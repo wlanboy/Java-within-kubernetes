@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-world
+  labels:
+    app: hello-world
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: hello-world
+  template:
+    metadata:
+      labels:
+        app: hello-world
+      annotations:
+        # bewusst kleine Prozess-Anzahl, damit sich JVM und Istio-Sidecar
+        # ein Core teilen koennen, ohne sich gegenseitig zu throtteln
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/actuator/prometheus"
+    spec:
+      # Zeit fuer graceful shutdown (Spring: 30s) + Puffer fuer Istio-Draining
+      terminationGracePeriodSeconds: 40
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: hello-world
+          image: wlanboy/helloworld:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: SPRING_CONFIG_ADDITIONAL_LOCATION
+              value: "optional:file:/config/"
+            - name: TZ
+              value: "Europe/Berlin"
+            # ActiveProcessorCount muss zum CPU-Limit unten passen (hier: 1 Core)
+            - name: JAVA_OPTS
+              value: >-
+                -Djava.security.egd=file:/dev/./urandom
+                -XX:+ExitOnOutOfMemoryError
+                -XX:MaxRAMPercentage=75.0
+                -XX:InitialRAMPercentage=75.0
+                -XX:+UseSerialGC
+                -XX:ActiveProcessorCount=1
+                -XX:TieredStopAtLevel=1
+          # startupProbe faengt langsame erste Requests/Klassenladen ab,
+          # ohne dass liveness den Pod waehrend des Starts killt
+          startupProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                # kurze Wartezeit, damit Istio-Sidecar den Pod aus dem
+                # Endpoint-Routing nimmt, bevor Tomcat den Shutdown beginnt
+                command: ["sh", "-c", "sleep 5"]
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              # 1 Core -> deckt sich mit -XX:ActiveProcessorCount=1
+              cpu: "1"
+              # Heap (75% von 512Mi ~ 384Mi) + Metaspace/Thread-Stacks/Code-Cache
+              memory: "512Mi"
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: hello-world-config
+        - name: tmp
+          emptyDir: {}
