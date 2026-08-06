@@ -118,4 +118,69 @@ for POD in ${PODS}; do
   else
     echo "Cgroup-Version konnte nicht ermittelt werden (kein Zugriff auf /sys/fs/cgroup im Container?)."
   fi
+
+  # --- Memory: cgroup-Limit vs. tatsaechlicher Verbrauch (RSS) ---
+  MEM_LIMIT_RAW=$(kubectl get pod -n "${NAMESPACE}" "${POD}" \
+    -o jsonpath='{.spec.containers[?(@.name=="hello-world")].resources.limits.memory}')
+  echo
+  echo "--- Memory (Limit: ${MEM_LIMIT_RAW:-?}) ---"
+
+  if [[ "${CGROUP_VER}" == "v2" ]]; then
+    MEM_CURRENT=$(kubectl exec -n "${NAMESPACE}" "${POD}" -c hello-world -- \
+      sh -c 'cat /sys/fs/cgroup/memory.current 2>/dev/null' 2>/dev/null || echo 0)
+    MEM_MAX=$(kubectl exec -n "${NAMESPACE}" "${POD}" -c hello-world -- \
+      sh -c 'cat /sys/fs/cgroup/memory.max 2>/dev/null' 2>/dev/null || echo 0)
+  elif [[ "${CGROUP_VER}" == "v1" ]]; then
+    MEM_CURRENT=$(kubectl exec -n "${NAMESPACE}" "${POD}" -c hello-world -- \
+      sh -c 'cat /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null' 2>/dev/null || echo 0)
+    MEM_MAX=$(kubectl exec -n "${NAMESPACE}" "${POD}" -c hello-world -- \
+      sh -c 'cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null' 2>/dev/null || echo 0)
+  else
+    MEM_CURRENT=0
+    MEM_MAX=0
+  fi
+
+  # RSS des Java-Prozesses (PID 1, da entrypoint.sh "exec java ..." nutzt)
+  RSS_KB=$(kubectl exec -n "${NAMESPACE}" "${POD}" -c hello-world -- \
+    sh -c "awk '/VmRSS/ {print \$2}' /proc/1/status 2>/dev/null" 2>/dev/null || echo 0)
+
+  awk -v cur="${MEM_CURRENT:-0}" -v max="${MEM_MAX:-0}" -v rss="${RSS_KB:-0}" 'BEGIN {
+    cur_mi = cur / 1024 / 1024
+    max_mi = (max == "max" || max == 0) ? -1 : max / 1024 / 1024
+    rss_mi = rss / 1024
+    pct = (max_mi > 0) ? (cur_mi / max_mi) * 100 : 0
+    if (max_mi > 0) {
+      printf "cgroup memory.current: %.1fMi / %.1fMi (~%.1f%% vom Limit)\n", cur_mi, max_mi, pct
+    } else {
+      printf "cgroup memory.current: %.1fMi (Limit nicht lesbar)\n", cur_mi
+    }
+    printf "Java-Prozess RSS (/proc/1/status): %.1fMi\n", rss_mi
+  }'
+
+  # --- Effektive Heap-Groesse: bestaetigt, dass MaxRAMPercentage=75.0 im Pod-Cgroup greift ---
+  echo
+  echo "--- Effektive JVM-Heap-Sizing (container-aware, MaxRAMPercentage=75.0) ---"
+  kubectl exec -n "${NAMESPACE}" "${POD}" -c hello-world -- \
+    sh -c 'java -XX:MaxRAMPercentage=75.0 -XX:InitialRAMPercentage=75.0 -XX:+PrintFlagsFinal -version 2>/dev/null \
+      | grep -E "MaxHeapSize|InitialHeapSize"' \
+    | awk '{ printf "%-20s = %.1fMi\n", $2, $4/1024/1024 }' \
+    || echo "nicht ermittelbar (java im Container nicht ausfuehrbar?)"
+
+  # --- AOT & Startzeit aus den Container-Logs ---
+  echo
+  echo "--- AOT-Verarbeitung & Startzeit (aus Pod-Logs) ---"
+  AOT_LINE=$(kubectl logs -n "${NAMESPACE}" "${POD}" -c hello-world 2>/dev/null | grep -m1 "AOT-processed" || true)
+  STARTED_LINE=$(kubectl logs -n "${NAMESPACE}" "${POD}" -c hello-world 2>/dev/null | grep -m1 -E "Started .* in [0-9.]+ seconds" || true)
+
+  if [[ -n "${AOT_LINE}" ]]; then
+    echo "AOT aktiv: ${AOT_LINE}"
+  else
+    echo "Kein 'AOT-processed' in den Logs gefunden (spring.aot.enabled evtl. nicht wirksam oder Logs bereits rotiert)."
+  fi
+
+  if [[ -n "${STARTED_LINE}" ]]; then
+    echo "Startzeit: ${STARTED_LINE}"
+  else
+    echo "Keine Startzeit-Zeile in den Logs gefunden."
+  fi
 done
