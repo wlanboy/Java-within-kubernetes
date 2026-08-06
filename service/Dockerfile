@@ -5,15 +5,16 @@
 # und <java.version>25</java.version> (siehe readme.md)
 FROM eclipse-temurin:25-jdk-alpine AS builder
 WORKDIR /workspace
-COPY pom.xml .
+COPY .mvn ./.mvn
+COPY mvnw pom.xml ./
 COPY src ./src
-RUN --mount=type=cache,target=/root/.m2 mvn -q -DskipTests compile spring-boot:process-aot package
+RUN --mount=type=cache,target=/root/.m2 ./mvnw -q -DskipTests compile spring-boot:process-aot package
 
 # --- Layer-Extraktion (kleineres, cachefreundlicheres Runtime-Image) ---
 FROM eclipse-temurin:25-jdk-alpine AS extractor
 WORKDIR /workspace
 COPY --from=builder /workspace/target/*.jar app.jar
-RUN java -Djarmode=tools -jar app.jar extract --layers --destination extracted
+RUN java -Djarmode=tools -jar app.jar extract --layers --launcher --destination extracted
 
 # --- Runtime ---
 FROM eclipse-temurin:25-jre-alpine
