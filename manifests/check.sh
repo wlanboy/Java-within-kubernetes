@@ -157,14 +157,31 @@ for POD in ${PODS}; do
     printf "Java-Prozess RSS (/proc/1/status): %.1fMi\n", rss_mi
   }'
 
-  # --- Effektive Heap-Groesse: bestaetigt, dass MaxRAMPercentage=75.0 im Pod-Cgroup greift ---
+  # --- Effektive JVM-Speicherwerte: liest die tatsaechlich laufenden JAVA_OPTS aus dem Pod
+  # (statt sie hier zu duplizieren, was bei Aenderungen im Deployment sonst leicht veraltet)
+  # und bestaetigt, dass Heap-Ergonomics, MaxMetaspaceSize, MaxDirectMemorySize und
+  # UsePerfData im Pod-Cgroup wie konfiguriert greifen ---
   echo
-  echo "--- Effektive JVM-Heap-Sizing (container-aware, MaxRAMPercentage=75.0) ---"
-  kubectl exec -n "${NAMESPACE}" "${POD}" -c hello-world -- \
-    sh -c 'java -XX:MaxRAMPercentage=75.0 -XX:InitialRAMPercentage=75.0 -XX:+PrintFlagsFinal -version 2>/dev/null \
-      | grep -E "MaxHeapSize|InitialHeapSize"' \
-    | awk '{ printf "%-20s = %.1fMi\n", $2, $4/1024/1024 }' \
-    || echo "nicht ermittelbar (java im Container nicht ausfuehrbar?)"
+  echo "--- Effektive JVM-Speicherwerte (aus den tatsaechlichen JAVA_OPTS des laufenden Pods) ---"
+  RUNNING_JAVA_OPTS=$(kubectl exec -n "${NAMESPACE}" "${POD}" -c hello-world -- \
+    sh -c "tr '\0' '\n' < /proc/1/environ | sed -n 's/^JAVA_OPTS=//p'" 2>/dev/null || true)
+
+  if [[ -z "${RUNNING_JAVA_OPTS}" ]]; then
+    echo "JAVA_OPTS nicht aus /proc/1/environ lesbar (Pod ohne Zugriff auf /proc/1 oder Variable nicht gesetzt)."
+  else
+    kubectl exec -n "${NAMESPACE}" "${POD}" -c hello-world -- \
+      sh -c "java ${RUNNING_JAVA_OPTS} -XX:+PrintFlagsFinal -version 2>/dev/null \
+        | grep -E 'MaxHeapSize|InitialHeapSize|MaxMetaspaceSize|MaxDirectMemorySize|UsePerfData'" \
+      | awk '{
+          if ($2 == "UsePerfData") { printf "%-20s = %s\n", $2, $4 }
+          else                     { printf "%-20s = %.1fMi\n", $2, $4/1024/1024 }
+        }' \
+      || echo "nicht ermittelbar (java im Container nicht ausfuehrbar?)"
+    echo "Hinweis: das sind die vom laufenden Prozess neu ausgewerteten *Ergonomics*-Werte,"
+    echo "keine Live-Belegung -- das JRE-Alpine-Image enthaelt kein jcmd/NMT fuer echte"
+    echo "Metaspace-/Direct-Memory-Verbrauchsmessung. Fuer echten Verbrauch: cgroup"
+    echo "memory.current oben beobachten, waehrend Last auf den Pod gegeben wird."
+  fi
 
   # --- AOT & Startzeit aus den Container-Logs ---
   echo
