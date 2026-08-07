@@ -42,18 +42,33 @@ spec:
             capabilities:
               drop: ["ALL"]
           env:
+            # laedt optional zusaetzliche Properties aus dem gemounteten ConfigMap-Volume;
+            # "optional:" verhindert einen Startfehler, falls die Datei mal fehlt
             - name: SPRING_CONFIG_ADDITIONAL_LOCATION
               value: "optional:file:/config/"
+            # Zeitzone fuer Logs/Timestamps im Container
             - name: TZ
               value: "Europe/Berlin"
-            # ActiveProcessorCount muss zum CPU-Limit unten passen (hier: 1 Core)
+            # JAVA_OPTS: JVM-Flags fuer ressourcenschonenden Betrieb im Container.
+            # Reihenfolge der Kommentare entspricht der Reihenfolge der Flags im Wert unten:
+            #   -Djava.security.egd=file:/dev/./urandom  -> nicht-blockierende Zufallszahlenquelle statt /dev/random (verhindert Startverzoegerung durch Entropie-Mangel)
+            #   -XX:+ExitOnOutOfMemoryError               -> Prozess beendet sich sofort bei Heap-OOM statt in kaputtem Zustand weiterzulaufen; Kubernetes startet den Pod neu
+            #   -XX:MaxRAMPercentage=70.0                 -> maximale Heap-Groesse als Anteil des Container-Memory-Limits (~358Mi von 512Mi)
+            #   -XX:InitialRAMPercentage=70.0             -> initiale Heap-Groesse identisch zum Max, kein Nachvergroessern zur Laufzeit noetig
+            #   -XX:MaxMetaspaceSize=96m                  -> deckelt Klassenmetadaten-Speicher (sonst unbegrenzt -> Risiko fuer natives OOM ausserhalb des Heaps)
+            #   -XX:MaxDirectMemorySize=32m               -> deckelt NIO-Direct-Buffers (von Tomcat genutzt), verhindert unbemerktes Off-Heap-Wachstum
+            #   -XX:-UsePerfData                          -> kein Schreiben von /tmp/hsperfdata_*; passt zu readOnlyRootFilesystem und spart I/O
+            #   -XX:+UseSerialGC                          -> Single-Threaded GC passend zu 1 CPU-Core, kein Overhead durch Parallel-/G1-GC-Threads
+            #   -XX:ActiveProcessorCount=1                -> JVM sieht nur 1 Core; muss zum CPU-Limit unten passen, sonst ueberschaetzte Thread-Pools/GC-Threads
+            #   -XX:TieredStopAtLevel=1                   -> nur C1-Compiler (kein C2); spart CPU/Speicher fuer JIT, passend fuer kleine/kurzlebige Workloads
             - name: JAVA_OPTS
               value: >-
                 -Djava.security.egd=file:/dev/./urandom
                 -XX:+ExitOnOutOfMemoryError
-                -XX:MaxRAMPercentage=75.0
-                -XX:InitialRAMPercentage=75.0
-                -XX:MaxMetaspaceSize=128m
+                -XX:MaxRAMPercentage=70.0
+                -XX:InitialRAMPercentage=70.0
+                -XX:MaxMetaspaceSize=96m
+                -XX:MaxDirectMemorySize=32m
                 -XX:-UsePerfData
                 -XX:+UseSerialGC
                 -XX:ActiveProcessorCount=1
@@ -94,7 +109,8 @@ spec:
             limits:
               # 1 Core -> deckt sich mit -XX:ActiveProcessorCount=1
               cpu: "1"
-              # Heap (75% von 512Mi ~ 384Mi) + Metaspace (gedeckelt auf 128m) + Thread-Stacks/Code-Cache
+              # Heap (70% von 512Mi ~ 358Mi) + Metaspace (96m) + Direct-Memory (32m)
+              # + Thread-Stacks/Code-Cache-Puffer
               memory: "512Mi"
               # deckelt Logs/Heap-Dumps im "tmp" emptyDir (readOnlyRootFilesystem)
               ephemeral-storage: "256Mi"
