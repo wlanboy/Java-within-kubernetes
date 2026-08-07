@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: hello-world
+  labels:
+    app: hello-world
+spec:
+  # bei replicas: 2 darf maximal einer gleichzeitig durch Node-Drain/Evacuation weichen
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: hello-world
