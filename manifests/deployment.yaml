@@ -53,6 +53,8 @@ spec:
                 -XX:+ExitOnOutOfMemoryError
                 -XX:MaxRAMPercentage=75.0
                 -XX:InitialRAMPercentage=75.0
+                -XX:MaxMetaspaceSize=128m
+                -XX:-UsePerfData
                 -XX:+UseSerialGC
                 -XX:ActiveProcessorCount=1
                 -XX:TieredStopAtLevel=1
@@ -88,11 +90,14 @@ spec:
             requests:
               cpu: "250m"
               memory: "256Mi"
+              ephemeral-storage: "128Mi"
             limits:
               # 1 Core -> deckt sich mit -XX:ActiveProcessorCount=1
               cpu: "1"
-              # Heap (75% von 512Mi ~ 384Mi) + Metaspace/Thread-Stacks/Code-Cache
+              # Heap (75% von 512Mi ~ 384Mi) + Metaspace (gedeckelt auf 128m) + Thread-Stacks/Code-Cache
               memory: "512Mi"
+              # deckelt Logs/Heap-Dumps im "tmp" emptyDir (readOnlyRootFilesystem)
+              ephemeral-storage: "256Mi"
           volumeMounts:
             - name: config
               mountPath: /config
