@@ -11,9 +11,11 @@ Voraussetzung für den Docker-Build ist ein Maven-Projekt (`pom.xml` + `src/`) n
 ## Deploy
 
 ```bash
-docker build -t your-registry.example.com/hello-world:1.0.0 service/
+docker build -t wlanboy/helloworld:latest service/
 kubectl apply -f manifests/
 ```
+
+**Hinweis zum Image-Tag:** [deployment.yaml](manifests/deployment.yaml) nutzt bewusst `:latest` mit `imagePullPolicy: IfNotPresent` für dieses Beispiel-Repo (schnelles lokales Bauen/Testen ohne Versions-Bumps). Für den produktiven Einsatz sollte stattdessen ein gepinnter Tag (z. B. `1.0.0`) oder ein Image-Digest verwendet werden, damit Rollouts reproduzierbar bleiben und Nodes nicht dauerhaft an ein veraltetes gecachtes `latest`-Image gebunden sind.
 
 ---
 
@@ -38,8 +40,11 @@ kubectl apply -f manifests/
 |---|---|
 | `-Djava.security.egd=file:/dev/./urandom` | Verhindert, dass `SecureRandom`/TLS-Handshakes beim Start auf den blockierenden `/dev/random`-Entropie-Pool warten (klassisches Problem in Containern mit wenig Entropie) – nutzt stattdessen den nicht-blockierenden `urandom`-Pfad. |
 | `-XX:+ExitOnOutOfMemoryError` | Lässt die JVM bei einem echten OOM sofort beenden, statt in einem undefinierten Zombie-Zustand weiterzulaufen. In Kubernetes ist das erwünscht: Der Container stirbt sauber, die Liveness-Probe schlägt fehl (oder der Exit passiert direkt) und Kubernetes startet den Pod neu. |
-| `-XX:MaxRAMPercentage=75.0` | Container-aware JVMs (seit JDK 10) leiten die Heap-Größe standardmäßig aus dem cgroup-Memory-Limit ab. Ohne diese Flags nutzt die JVM nur 25 % des Limits als Heap. 75 % lassen ausreichend Puffer für Metaspace, Thread-Stacks, Code-Cache und Off-Heap-Buffer innerhalb des `resources.limits.memory` (hier 512Mi → Heap ≈ 384Mi). |
-| `-XX:InitialRAMPercentage=75.0` | Initial- = Max-Heap, damit die Heap-Größe nicht erst über mehrere GC-Zyklen zur Laufzeit hochwächst (schnellerer, stabilerer Start; für kleine, kurzlebige Microservices üblich). |
+| `-XX:MaxRAMPercentage=70.0` | Container-aware JVMs (seit JDK 10) leiten die Heap-Größe standardmäßig aus dem cgroup-Memory-Limit ab. Ohne diese Flags nutzt die JVM nur 25 % des Limits als Heap. 70 % lassen ausreichend Puffer für Metaspace, Thread-Stacks, Code-Cache und Off-Heap-Buffer innerhalb des `resources.limits.memory` (hier 512Mi → Heap ≈ 358Mi). |
+| `-XX:InitialRAMPercentage=70.0` | Initial- = Max-Heap, damit die Heap-Größe nicht erst über mehrere GC-Zyklen zur Laufzeit hochwächst (schnellerer, stabilerer Start; für kleine, kurzlebige Microservices üblich). |
+| `-XX:MaxMetaspaceSize=96m` | Deckelt Klassenmetadaten-Speicher (sonst unbegrenzt → Risiko für natives OOM außerhalb des Heaps). |
+| `-XX:MaxDirectMemorySize=32m` | Deckelt NIO-Direct-Buffers (von Tomcat genutzt), verhindert unbemerktes Off-Heap-Wachstum. |
+| `-XX:-UsePerfData` | Kein Schreiben von `/tmp/hsperfdata_*`; passt zu `readOnlyRootFilesystem: true` und spart I/O. |
 | `-XX:+UseSerialGC` | Siehe [GC-Guide](#garbage-collector-guide) unten – bewusst gewählt, weil der Pod nur 1 CPU-Core hat. |
 | `-XX:ActiveProcessorCount=1` | Muss exakt zum CPU-`limit` im Deployment passen. Ohne explizite Angabe leitet die JVM die sichtbaren Cores teils aus `cpu.shares`/Node-Cores statt aus dem tatsächlichen `limit` ab und legt dann zu viele GC-/JIT-Compiler-Threads an, die unter dem CFS-Quota nur throtteln statt zu arbeiten. |
 | `-XX:TieredStopAtLevel=1` | Beschränkt den JIT auf den C1-Compiler (kein aufwendiges C2-Tiering). Reduziert Compiler-Threads, RAM- und CPU-Verbrauch und verkürzt die Zeit bis zur "warmen" Performance – auf Kosten von etwas Peak-Throughput bei sehr lange laufenden, rechenintensiven Prozessen. Für kleine, horizontal skalierte Services (viele kurzlebige Pods, kein Dauerlast-Batch-Job) meist die bessere Wahl. In Kombination mit `spring.aot.enabled=true` (AOT-Verarbeitung, siehe Dockerfile) besonders wirksam für schnellen Start. |
@@ -84,10 +89,10 @@ kubectl apply -f manifests/
 |---|---|---|
 | `resources.limits.cpu` | `1` | Deckt sich mit `-XX:ActiveProcessorCount=1` und der Wahl von Serial GC – ein einzelner GC-Thread kann den einen verfügbaren Core voll nutzen, ohne dass CFS-Throttling zwischen mehreren GC-Threads hin- und herschaltet. |
 | `resources.requests.cpu` | `250m` | Erlaubt Kubernetes ein engeres Bin-Packing im Node, während Burst bis zum Limit (1 Core) für Lastspitzen/Start (AOT-Klassenladen, JIT) möglich bleibt. |
-| `resources.limits.memory` | `512Mi` | Ergibt mit `-XX:MaxRAMPercentage=75.0` einen Heap von ~384Mi; die restlichen ~128Mi decken Metaspace, Thread-Stacks (`threads.max=20` × Default-Stackgröße), Code-Cache und native/Off-Heap-Puffer ab. |
+| `resources.limits.memory` | `512Mi` | Ergibt mit `-XX:MaxRAMPercentage=70.0` einen Heap von ~358Mi; von den verbleibenden ~154Mi sind `-XX:MaxMetaspaceSize=96m` und `-XX:MaxDirectMemorySize=32m` explizit gedeckelt (zusammen 128Mi), der Rest (~26Mi) puffert Thread-Stacks (`threads.max=20` × Default-Stackgröße) und Code-Cache. |
 | `resources.requests.memory` | `256Mi` | Realistischer Ruhezustands-Verbrauch nach dem Start; verhindert übermäßiges Overcommitment auf dem Node bei gleichzeitig ausreichend Headroom bis zum Limit. |
 
-**Wichtig:** `limits.memory` sollte nie so knapp gewählt werden, dass `MaxRAMPercentage` den gesamten Container-Speicher als Heap beansprucht (kein Puffer für Metaspace/Threads → OOMKilled trotz "funktionierender" Heap-Größe). 75 % ist hierfür ein bewährter Kompromiss.
+**Wichtig:** `limits.memory` sollte nie so knapp gewählt werden, dass `MaxRAMPercentage` den gesamten Container-Speicher als Heap beansprucht (kein Puffer für Metaspace/Threads → OOMKilled trotz "funktionierender" Heap-Größe). 70 % ist hierfür ein bewährter Kompromiss.
 
 ---
 
