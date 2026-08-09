@@ -61,6 +61,7 @@ spec:
             #   -XX:+UseSerialGC                          -> Single-Threaded GC passend zu 1 CPU-Core, kein Overhead durch Parallel-/G1-GC-Threads
             #   -XX:ActiveProcessorCount=1                -> JVM sieht nur 1 Core; muss zum CPU-Limit unten passen, sonst ueberschaetzte Thread-Pools/GC-Threads
             #   -XX:TieredStopAtLevel=1                   -> nur C1-Compiler (kein C2); spart CPU/Speicher fuer JIT, passend fuer kleine/kurzlebige Workloads
+            #   -Dspring.aot.enabled=true                 -> aktiviert zur Laufzeit die beim Build per spring-boot:process-aot generierten AOT-Metadaten (weniger Reflection/Proxy-Arbeit beim Start -> schnellerer, ressourcenschonenderer Boot)
             - name: JAVA_OPTS
               value: >-
                 -Djava.security.egd=file:/dev/./urandom
@@ -73,20 +74,26 @@ spec:
                 -XX:+UseSerialGC
                 -XX:ActiveProcessorCount=1
                 -XX:TieredStopAtLevel=1
+                -Dspring.aot.enabled=true
           # startupProbe faengt langsame erste Requests/Klassenladen ab,
           # ohne dass liveness den Pod waehrend des Starts killt
+          # timeoutSeconds hoeher als Default (1s): bei 1 CPU-Core + SerialGC
+          # kann eine Stop-the-World-Pause oder kurzer Lastspitzen-Stau den
+          # Actuator-Call ueber 1s ziehen, ohne dass das ein echter Fehler ist
           startupProbe:
             httpGet:
               path: /actuator/health/readiness
               port: http
             failureThreshold: 30
             periodSeconds: 2
+            timeoutSeconds: 5
           readinessProbe:
             httpGet:
               path: /actuator/health/readiness
               port: http
             initialDelaySeconds: 0
             periodSeconds: 10
+            timeoutSeconds: 5
             failureThreshold: 3
           livenessProbe:
             httpGet:
@@ -94,6 +101,7 @@ spec:
               port: http
             initialDelaySeconds: 0
             periodSeconds: 10
+            timeoutSeconds: 5
             failureThreshold: 3
           lifecycle:
             preStop:
