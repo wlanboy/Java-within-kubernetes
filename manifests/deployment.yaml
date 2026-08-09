@@ -14,8 +14,6 @@ spec:
       labels:
         app: hello-world
       annotations:
-        # bewusst kleine Prozess-Anzahl, damit sich JVM und Istio-Sidecar
-        # ein Core teilen koennen, ohne sich gegenseitig zu throtteln
         prometheus.io/scrape: "true"
         prometheus.io/port: "8080"
         prometheus.io/path: "/actuator/prometheus"
@@ -24,9 +22,15 @@ spec:
       terminationGracePeriodSeconds: 40
       securityContext:
         runAsNonRoot: true
+        # 1000 muss exakt zur UID/GID im Runtime-Image passen (siehe service/Dockerfile,
+        # "addgroup -g 1000 ... adduser -u 1000 ..."), sonst schlaegt der Start fehl
         runAsUser: 1000
+        # gleiche GID wie runAsUser, damit gemountete Volumes (config/tmp) fuer den
+        # Prozess beschreibbar/lesbar sind, ohne dass das Image root braucht
         fsGroup: 1000
         seccompProfile:
+          # RuntimeDefault statt Unconfined: nutzt das vom Cluster/Runtime
+          # bereitgestellte Standard-Seccomp-Profil als Basis-Haertung
           type: RuntimeDefault
       containers:
         - name: hello-world
@@ -37,9 +41,15 @@ spec:
               containerPort: 8080
               protocol: TCP
           securityContext:
+            # verhindert, dass der Prozess sich selbst mehr Rechte verschafft
+            # als der startende User hat (z.B. via setuid-Binaries)
             allowPrivilegeEscalation: false
+            # Root-Dateisystem des Containers read-only; einzige Schreibziele
+            # sind die explizit gemounteten Volumes config (readOnly) und tmp
             readOnlyRootFilesystem: true
             capabilities:
+              # alle Linux-Capabilities entziehen; die JVM/Tomcat braucht keine
+              # (kein Bind an Ports < 1024, kein Netzwerk-/Kernel-Zugriff noetig)
               drop: ["ALL"]
           env:
             # laedt optional zusaetzliche Properties aus dem gemounteten ConfigMap-Volume;
@@ -84,6 +94,8 @@ spec:
             httpGet:
               path: /actuator/health/readiness
               port: http
+            # failureThreshold 30 x periodSeconds 2s = 60s Startbudget, bevor
+            # Kubernetes den Start als fehlgeschlagen wertet und den Pod neu startet
             failureThreshold: 30
             periodSeconds: 2
             timeoutSeconds: 5
@@ -91,17 +103,22 @@ spec:
             httpGet:
               path: /actuator/health/readiness
               port: http
+            # kein Delay noetig: startupProbe hat den langsamen Start bereits abgefangen
             initialDelaySeconds: 0
             periodSeconds: 10
             timeoutSeconds: 5
+            # nach 3 Fehlschlägen in Folge (~30s) aus dem Service-Endpoint genommen
             failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /actuator/health/liveness
               port: http
+            # kein Delay noetig: startupProbe hat den langsamen Start bereits abgefangen
             initialDelaySeconds: 0
             periodSeconds: 10
             timeoutSeconds: 5
+            # nach 3 Fehlschlägen in Folge (~30s) haelt Kubernetes den Pod fuer
+            # nicht mehr reparierbar und startet ihn neu
             failureThreshold: 3
           lifecycle:
             preStop:
@@ -111,11 +128,18 @@ spec:
                 command: ["sh", "-c", "sleep 5"]
           resources:
             requests:
+              # niedrig angesetzt fuer engeres Bin-Packing im Node; Burst bis zum
+              # Limit (1 Core) fuer Lastspitzen/Start (AOT-Klassenladen, JIT) bleibt moeglich
               cpu: "250m"
+              # realistischer Ruhezustands-Verbrauch nach dem Start
               memory: "256Mi"
+              # Platz fuer Logs/temporaere Dateien im Normalbetrieb;
+              # das Limit (256Mi) deckelt Ausreisser wie Heap-Dumps
               ephemeral-storage: "128Mi"
             limits:
-              # 1 Core -> deckt sich mit -XX:ActiveProcessorCount=1
+              # 1 Core -> deckt sich mit -XX:ActiveProcessorCount=1; bewusst klein
+              # gehalten, damit sich JVM und Istio-Sidecar einen Core teilen
+              # koennen, ohne sich gegenseitig zu throtteln
               cpu: "1"
               # Heap (70% von 512Mi ~ 358Mi) + Metaspace (96m) + Direct-Memory (32m)
               # + Thread-Stacks/Code-Cache-Puffer
@@ -133,4 +157,6 @@ spec:
           configMap:
             name: hello-world-config
         - name: tmp
+          # beschreibbares emptyDir fuer /tmp, noetig weil readOnlyRootFilesystem: true
+          # das Root-Dateisystem des Containers schreibgeschuetzt macht
           emptyDir: {}
