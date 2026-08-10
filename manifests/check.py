@@ -256,11 +256,6 @@ def check_jvm_memory(pod):
         else:
             kv(name, f"{to_int(value) / 1024 / 1024:.1f}Mi")
 
-    info_line("Hinweis:")
-    info_line("JRE-Image enthaelt kein jcmd/NMT fuer echte Metaspace-/Direct-Memory-Verbrauchsmessung.")
-    info_line("Fuer echten Verbrauch: memory.current oben unter Last beobachten.")
-
-
 def check_aot_and_startup(pod):
     section("AOT-Verarbeitung & Startzeit (aus Pod-Logs)")
     cp = run(["kubectl", "logs", "-n", NAMESPACE, pod, "-c", CONTAINER])
