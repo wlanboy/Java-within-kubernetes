@@ -256,10 +256,9 @@ def check_jvm_memory(pod):
         else:
             kv(name, f"{to_int(value) / 1024 / 1024:.1f}Mi")
 
-    info_line("Hinweis: konfigurierte Ergonomics-Werte, keine Live-Belegung -- das")
-    info_line("JRE-Alpine-Image enthaelt kein jcmd/NMT fuer echte Metaspace-/Direct-")
-    info_line("Memory-Verbrauchsmessung. Fuer echten Verbrauch: memory.current oben")
-    info_line("unter Last beobachten.")
+    info_line("Hinweis:")
+    info_line("JRE-Image enthaelt kein jcmd/NMT fuer echte Metaspace-/Direct-Memory-Verbrauchsmessung.")
+    info_line("Fuer echten Verbrauch: memory.current oben unter Last beobachten.")
 
 
 def check_aot_and_startup(pod):
