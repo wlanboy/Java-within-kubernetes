@@ -103,13 +103,36 @@ def kubectl_jsonpath(pod, jsonpath):
 
 
 def parse_stat_file(content):
-    """Parst 'key value'-Zeilen (cpu.stat, cpu.pressure-aehnlich) in ein dict."""
+    """Parst 'key value'-Zeilen (cpu.stat) in ein dict."""
     result = {}
     for line in content.splitlines():
         parts = line.split()
         if len(parts) >= 2:
             result[parts[0]] = parts[1]
     return result
+
+
+def parse_psi(content):
+    """Parst PSI-Format ('some avg10=.. avg60=.. avg300=.. total=..') je Zeile in ein dict von dicts."""
+    result = {}
+    for line in content.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        fields = {}
+        for tok in parts[1:]:
+            if "=" in tok:
+                k, v = tok.split("=", 1)
+                fields[k] = v
+        result[parts[0]] = fields
+    return result
+
+
+def non_negative_delta(before, after):
+    """after-before, aber nie negativ: schuetzt vor scheinbar negativen Werten, falls
+    die Cgroup-Zaehler zwischen den beiden Messpunkten resettet wurden (z.B. Pod-Neustart
+    waehrend des Mess-Intervalls)."""
+    return max(0, after - before)
 
 
 def parse_cpu_quantity(raw):
@@ -141,15 +164,30 @@ def check_cpu(pod, cpu_limit_cores):
 
     if cgroup_ver == "v2":
         stat1 = parse_stat_file(kubectl_exec(pod, "cat /sys/fs/cgroup/cpu.stat 2>/dev/null"))
+        psi1 = parse_psi(kubectl_exec(pod, "cat /sys/fs/cgroup/cpu.pressure 2>/dev/null"))
         time.sleep(INTERVAL)
         stat2 = parse_stat_file(kubectl_exec(pod, "cat /sys/fs/cgroup/cpu.stat 2>/dev/null"))
+        psi2 = parse_psi(kubectl_exec(pod, "cat /sys/fs/cgroup/cpu.pressure 2>/dev/null"))
 
-        usage_delta_s = (to_int(stat2.get("usage_usec")) - to_int(stat1.get("usage_usec"))) / 1_000_000
-        periods_delta = to_int(stat2.get("nr_periods")) - to_int(stat1.get("nr_periods"))
-        throttled_delta = to_int(stat2.get("nr_throttled")) - to_int(stat1.get("nr_throttled"))
-        throttled_ms = (to_int(stat2.get("throttled_usec")) - to_int(stat1.get("throttled_usec"))) / 1000
+        usage_delta_s = non_negative_delta(to_int(stat1.get("usage_usec")), to_int(stat2.get("usage_usec"))) / 1_000_000
+        periods_delta = non_negative_delta(to_int(stat1.get("nr_periods")), to_int(stat2.get("nr_periods")))
+        throttled_delta = non_negative_delta(to_int(stat1.get("nr_throttled")), to_int(stat2.get("nr_throttled")))
+        throttled_ms = non_negative_delta(to_int(stat1.get("throttled_usec")), to_int(stat2.get("throttled_usec"))) / 1000
 
-        psi = kubectl_exec(pod, "cat /sys/fs/cgroup/cpu.pressure 2>/dev/null").strip()
+        # PSI "total" ist ein seit Cgroup-Erstellung kumulativer Zaehler (keine Fenstergroesse);
+        # daher vor/nach dem Sleep diffen, statt den rohen (kumulativen) Wert als "letzte Ns" auszugeben
+        psi_lines = []
+        for kind, title in (("some", "PSI some (cpu.pressure)"), ("full", "PSI full (cpu.pressure)")):
+            f2 = psi2.get(kind)
+            if not f2:
+                continue
+            f1 = psi1.get(kind, {})
+            total_delta_ms = non_negative_delta(to_int(f1.get("total")), to_int(f2.get("total"))) / 1000
+            psi_lines.append((
+                title,
+                f"avg10={f2.get('avg10', '?')} avg60={f2.get('avg60', '?')} avg300={f2.get('avg300', '?')}"
+                f"  total(letzte {INTERVAL:g}s)={total_delta_ms:.1f}ms",
+            ))
         quota = kubectl_exec(pod, "cat /sys/fs/cgroup/cpu.max 2>/dev/null").strip()
 
     elif cgroup_ver == "v1":
@@ -159,12 +197,10 @@ def check_cpu(pod, cpu_limit_cores):
         usage2 = to_int(kubectl_exec(pod, "cat /sys/fs/cgroup/cpuacct/cpuacct.usage 2>/dev/null").strip())
         stat2 = parse_stat_file(kubectl_exec(pod, "cat /sys/fs/cgroup/cpu/cpu.stat 2>/dev/null"))
 
-        usage_delta_s = (usage2 - usage1) / 1_000_000_000
-        periods_delta = to_int(stat2.get("nr_periods")) - to_int(stat1.get("nr_periods"))
-        throttled_delta = to_int(stat2.get("nr_throttled")) - to_int(stat1.get("nr_throttled"))
-        throttled_ms = (to_int(stat2.get("throttled_time")) - to_int(stat1.get("throttled_time"))) / 1_000_000
-
-        psi = None
+        usage_delta_s = non_negative_delta(usage1, usage2) / 1_000_000_000
+        periods_delta = non_negative_delta(to_int(stat1.get("nr_periods")), to_int(stat2.get("nr_periods")))
+        throttled_delta = non_negative_delta(to_int(stat1.get("nr_throttled")), to_int(stat2.get("nr_throttled")))
+        throttled_ms = non_negative_delta(to_int(stat1.get("throttled_time")), to_int(stat2.get("throttled_time"))) / 1_000_000
         quota = kubectl_exec(
             pod,
             'echo "quota_us=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us) '
@@ -175,8 +211,11 @@ def check_cpu(pod, cpu_limit_cores):
         return cgroup_ver
 
     section(f"CPU ({cgroup_ver}, letzte {INTERVAL:g}s)")
-    cpu_pct = (usage_delta_s / (INTERVAL * cpu_limit_cores) * 100) if cpu_limit_cores > 0 else 0.0
-    kv("CPU-Zeit verbraucht", f"{usage_delta_s:.3f}s / {INTERVAL:g}s  {bar(cpu_pct)}")
+    if cpu_limit_cores > 0:
+        cpu_pct = usage_delta_s / (INTERVAL * cpu_limit_cores) * 100
+        kv("CPU-Zeit verbraucht", f"{usage_delta_s:.3f}s / {INTERVAL:g}s  {bar(cpu_pct)}")
+    else:
+        kv("CPU-Zeit verbraucht", f"{usage_delta_s:.3f}s / {INTERVAL:g}s  {dim('(kein CPU-Limit gesetzt, % nicht berechenbar)')}")
 
     throttle_pct = (throttled_delta / periods_delta * 100) if periods_delta > 0 else 0.0
     kv(
@@ -187,10 +226,9 @@ def check_cpu(pod, cpu_limit_cores):
 
     if cgroup_ver == "v2":
         kv("CPU Quota (cpu.max)", quota or dim("nicht lesbar"))
-        if psi:
-            kv("PSI (cpu.pressure)", psi.splitlines()[0] if psi else "")
-            for extra in psi.splitlines()[1:]:
-                kv("", extra)
+        if psi_lines:
+            for label, text in psi_lines:
+                kv(label, text)
         else:
             info_line("PSI nicht verfuegbar (Kernel-Feature evtl. deaktiviert)")
     else:
@@ -213,48 +251,76 @@ def check_memory(pod, cgroup_ver, mem_limit_raw):
         # v1 meldet bei "kein Limit" eine riesige Zahl nahe PAGE_COUNTER_MAX statt "max"
         mem_max = None if mem_max_val <= 0 or mem_max_val > (1 << 62) else mem_max_val
     else:
-        mem_current, mem_max = 0, None
+        warn_line("Cgroup-Version unbekannt, cgroup memory.current nicht ermittelbar.")
+        mem_current, mem_max = None, None
 
     rss_kb = to_int(kubectl_exec(pod, "awk '/VmRSS/ {print $2}' /proc/1/status 2>/dev/null").strip())
-
-    cur_mi = mem_current / 1024 / 1024
     rss_mi = rss_kb / 1024
-    if mem_max:
-        max_mi = mem_max / 1024 / 1024
-        pct = cur_mi / max_mi * 100
-        kv("cgroup memory.current", f"{cur_mi:.1f}Mi / {max_mi:.1f}Mi  {bar(pct)}")
+
+    if mem_current is None:
+        kv("cgroup memory.current", dim("nicht ermittelbar"))
     else:
-        kv("cgroup memory.current", f"{cur_mi:.1f}Mi  {dim('(Limit nicht lesbar)')}")
+        cur_mi = mem_current / 1024 / 1024
+        if mem_max:
+            max_mi = mem_max / 1024 / 1024
+            pct = cur_mi / max_mi * 100
+            kv("cgroup memory.current", f"{cur_mi:.1f}Mi / {max_mi:.1f}Mi  {bar(pct)}")
+        else:
+            kv("cgroup memory.current", f"{cur_mi:.1f}Mi  {dim('(Limit nicht lesbar)')}")
     kv("Java-Prozess RSS", f"{rss_mi:.1f}Mi  {dim('(/proc/1/status)')}")
 
+    return mem_max
 
-def check_jvm_memory(pod):
-    section("Effektive JVM-Speicherwerte")
+
+def parse_size_to_mi(raw):
+    """'96m' -> 96.0, '32m' -> 32.0, '1g' -> 1024.0, Bytes ohne Suffix -> /1024/1024. None bei unbekanntem Format."""
+    if raw is None:
+        return None
+    m = re.match(r"^(\d+)([kKmMgG]?)$", raw)
+    if not m:
+        return None
+    value, unit = int(m.group(1)), m.group(2).lower()
+    factor = {"": 1 / (1024 * 1024), "k": 1 / 1024, "m": 1.0, "g": 1024.0}[unit]
+    return value * factor
+
+
+def check_jvm_memory(pod, mem_limit_bytes):
+    # liest nur JAVA_OPTS aus /proc/1/environ und rechnet die effektiven Werte selbst aus,
+    # statt dafuer einen zusaetzlichen "java -version"-Prozess im Container zu starten
+    section("Effektive JVM-Speicherwerte (aus JAVA_OPTS berechnet)")
 
     raw_opts = kubectl_exec(pod, "tr '\\0' '\\n' < /proc/1/environ | sed -n 's/^JAVA_OPTS=//p'").strip()
     if not raw_opts:
         warn_line("JAVA_OPTS nicht aus /proc/1/environ lesbar (kein Zugriff oder Variable nicht gesetzt).")
         return
 
-    flags_out = kubectl_exec(
-        pod,
-        f"java {raw_opts} -XX:+PrintFlagsFinal -version 2>/dev/null "
-        "| grep -E 'MaxHeapSize|InitialHeapSize|MaxMetaspaceSize|MaxDirectMemorySize|UsePerfData'",
-    )
-    if not flags_out.strip():
-        warn_line("nicht ermittelbar (java im Container nicht ausfuehrbar?)")
-        return
+    def flag_value(name):
+        m = re.search(rf"-XX:{name}=(\S+)", raw_opts)
+        return m.group(1) if m else None
 
-    pattern = re.compile(r"^\s*\S+\s+(\S+)\s*:?=\s*(\S+)")
-    for line in flags_out.splitlines():
-        m = pattern.match(line)
-        if not m:
-            continue
-        name, value = m.group(1), m.group(2)
-        if name == "UsePerfData":
-            kv(name, value)
+    for flag in ("MaxMetaspaceSize", "MaxDirectMemorySize"):
+        size_mi = parse_size_to_mi(flag_value(flag))
+        if size_mi is not None:
+            kv(flag, f"{size_mi:.1f}Mi")
         else:
-            kv(name, f"{to_int(value) / 1024 / 1024:.1f}Mi")
+            info_line(f"{flag} nicht in JAVA_OPTS gesetzt (JVM-Default)")
+
+    if "-XX:-UsePerfData" in raw_opts:
+        kv("UsePerfData", "false")
+    elif "-XX:+UsePerfData" in raw_opts:
+        kv("UsePerfData", "true")
+    else:
+        kv("UsePerfData", dim("Default (true)"))
+
+    for flag, label in (("MaxRAMPercentage", "MaxHeapSize"), ("InitialRAMPercentage", "InitialHeapSize")):
+        pct_raw = flag_value(flag)
+        if pct_raw and mem_limit_bytes:
+            heap_mi = mem_limit_bytes / 1024 / 1024 * float(pct_raw) / 100
+            limit_mi = mem_limit_bytes / 1024 / 1024
+            kv(f"{label} (berechnet)", f"~{heap_mi:.1f}Mi  {dim(f'({pct_raw}% von {limit_mi:.0f}Mi Memory-Limit)')}")
+        else:
+            info_line(f"{label} nicht berechenbar ({flag} oder Memory-Limit fehlt)")
+
 
 def check_aot_and_startup(pod):
     section("AOT-Verarbeitung & Startzeit (aus Pod-Logs)")
@@ -302,8 +368,8 @@ def main():
 
         cpu_limit_cores = parse_cpu_quantity(cpu_limit_raw)
         cgroup_ver = check_cpu(pod, cpu_limit_cores)
-        check_memory(pod, cgroup_ver, mem_limit_raw)
-        check_jvm_memory(pod)
+        mem_max_bytes = check_memory(pod, cgroup_ver, mem_limit_raw)
+        check_jvm_memory(pod, mem_max_bytes)
         check_aot_and_startup(pod)
 
     print()
