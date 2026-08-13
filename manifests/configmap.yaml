@@ -20,6 +20,22 @@ data:
     server.tomcat.accept-count=100
     # Anzahl der Processor-Objekte, die Tomcat zur Wiederverwendung vorhaelt (Default: 200)
     server.tomcat.processor-cache=200
+    # Bei threads.max=20 reichen wenige Idle-Threads (Default: 10)
+    server.tomcat.threads.min-spare=5
+
+    # --- Timeouts: kurz halten, damit offene Keep-Alive-Verbindungen den graceful shutdown
+    # (preStop-sleep von nur 5s, siehe Deployment) nicht verzoegern
+    # server.tomcat.connection-timeout=20s (Default)
+    server.tomcat.connection-timeout=5s
+    server.tomcat.keep-alive-timeout=15s
+
+    # --- Hinter dem Istio-Sidecar: X-Forwarded-* Header vom Spring-Framework auswerten lassen,
+    # damit Client-IP/Schema/Host in Logs und generierten URLs korrekt ankommen
+    server.forward-headers-strategy=framework
+
+    # --- JMX-Registrierung der Tomcat-MBeans abschalten: spart etwas Startzeit/Speicher,
+    # da kein JMX-Monitoring genutzt wird (Metriken laufen ueber Actuator/Prometheus)
+    server.tomcat.mbeanregistry.enabled=false
 
     # --- Graceful shutdown: Zeitfenster muss zum terminationGracePeriodSeconds im Deployment passen ---
     spring.lifecycle.timeout-per-shutdown-phase=30s
