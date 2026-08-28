@@ -28,6 +28,10 @@ data:
     # server.tomcat.connection-timeout=20s (Default)
     server.tomcat.connection-timeout=5s
     server.tomcat.keep-alive-timeout=15s
+    # Begrenzt Requests pro Keep-Alive-Verbindung (Default: 100). Bei nur 2 Replicas
+    # sorgt ein niedrigerer Wert fuer periodische Reconnects, damit eine einzelne
+    # lang gehaltene Verbindung nicht dauerhaft denselben Pod bindet
+    server.tomcat.max-keep-alive-requests=50
 
     # --- Hinter dem Istio-Sidecar: X-Forwarded-* Header vom Spring-Framework auswerten lassen,
     # damit Client-IP/Schema/Host in Logs und generierten URLs korrekt ankommen
@@ -40,8 +44,19 @@ data:
     # --- Graceful shutdown: Zeitfenster muss zum terminationGracePeriodSeconds im Deployment passen ---
     spring.lifecycle.timeout-per-shutdown-phase=30s
 
+    # --- Actuator auf eigenem Port: Health/Metrics/Prometheus sind damit nicht ueber
+    # den Kubernetes-Service/Istio erreichbar, sondern nur direkt auf dem Pod (Probes
+    # und Prometheus-Scrape gehen an der Pod-IP vorbei am Service) ---
+    management.server.port=8081
+
     # --- Actuator: fuer Kubernetes Liveness-/Readiness-Probes ---
     management.endpoints.web.exposure.include=health,info,prometheus
     management.endpoint.health.probes.enabled=true
     management.health.livenessstate.enabled=true
     management.health.readinessstate.enabled=true
+    # verhindert, dass interne Detail-Infos (DB-Status, Disk-Space etc.) ueber
+    # /actuator/health nach aussen sichtbar werden, falls der Endpoint doch erreichbar ist
+    management.endpoint.health.show-details=never
+    # taggt alle Prometheus-Metriken mit dem App-Namen, damit sich die Serien in
+    # Prometheus/Grafana bei mehreren Deployments sauber unterscheiden lassen
+    management.metrics.tags.application=hello-world

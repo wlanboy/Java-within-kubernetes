@@ -23,7 +23,9 @@ spec:
         app: hello-world
       annotations:
         prometheus.io/scrape: "true"
-        prometheus.io/port: "8080"
+        # eigener Management-Port (siehe configmap.yaml: management.server.port),
+        # Prometheus scraped die Pod-IP direkt und geht damit am Service vorbei
+        prometheus.io/port: "8081"
         prometheus.io/path: "/actuator/prometheus"
     spec:
       # Zeit fuer graceful shutdown (Spring: 30s) + Puffer fuer Istio-Draining
@@ -64,6 +66,12 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+              protocol: TCP
+            # separater Actuator-Port (management.server.port in configmap.yaml):
+            # nicht im Service exposed, daher ueber den Kubernetes-Service/Istio
+            # nicht erreichbar, nur direkt an der Pod-IP (Probes, Prometheus-Scrape)
+            - name: management
+              containerPort: 8081
               protocol: TCP
           securityContext:
             # verhindert, dass der Prozess sich selbst mehr Rechte verschafft
@@ -118,7 +126,7 @@ spec:
           startupProbe:
             httpGet:
               path: /actuator/health/readiness
-              port: http
+              port: management
             # failureThreshold 30 x periodSeconds 2s = 60s Startbudget, bevor
             # Kubernetes den Start als fehlgeschlagen wertet und den Pod neu startet
             failureThreshold: 30
@@ -127,7 +135,7 @@ spec:
           readinessProbe:
             httpGet:
               path: /actuator/health/readiness
-              port: http
+              port: management
             # kein Delay noetig: startupProbe hat den langsamen Start bereits abgefangen
             initialDelaySeconds: 0
             periodSeconds: 10
@@ -137,7 +145,7 @@ spec:
           livenessProbe:
             httpGet:
               path: /actuator/health/liveness
-              port: http
+              port: management
             # kein Delay noetig: startupProbe hat den langsamen Start bereits abgefangen
             initialDelaySeconds: 0
             periodSeconds: 10
