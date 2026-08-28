@@ -6,6 +6,14 @@ metadata:
     app: hello-world
 spec:
   replicas: 2
+  # explizit statt Default (25% auf/ab, rundet bei replicas:2 zufaellig): waehrend
+  # des Rollouts darf kein Pod fehlen (maxUnavailable:0), stattdessen kurzzeitig
+  # ein dritter Pod zusaetzlich (maxSurge:1) -> Zero-Downtime-Deploy
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: hello-world
@@ -20,6 +28,23 @@ spec:
     spec:
       # Zeit fuer graceful shutdown (Spring: 30s) + Puffer fuer Istio-Draining
       terminationGracePeriodSeconds: 40
+      # App braucht keinen Zugriff auf die Kubernetes-API; Token nicht mounten
+      # reduziert die Angriffsflaeche (kein SA-Token im Pod, der bei einem
+      # Container-Escape missbraucht werden koennte)
+      automountServiceAccountToken: false
+      # verhindert, dass beide Replicas auf demselben Node landen: die
+      # PodDisruptionBudget (minAvailable:1) schuetzt nur vor freiwilligem
+      # Draining, nicht vor einem Node-Ausfall. "preferred" statt "required",
+      # damit das Scheduling auch bei wenigen Nodes (z.B. lokal/Test) nicht blockiert
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: hello-world
+                topologyKey: kubernetes.io/hostname
       securityContext:
         runAsNonRoot: true
         # 1000 muss exakt zur UID/GID im Runtime-Image passen (siehe service/Dockerfile,
