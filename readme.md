@@ -109,3 +109,13 @@ kubectl apply -f manifests/
 
 ---
 
+## Verfügbarkeit & Sicherheit (`manifests/deployment.yaml`)
+
+| Setting | Wert | Begründung |
+|---|---|---|
+| `spec.strategy` | `RollingUpdate`, `maxUnavailable: 0`, `maxSurge: 1` | Explizit statt Default (25 % auf/ab, rundet bei `replicas: 2` ungünstig): Während des Rollouts darf kein Pod fehlen, stattdessen läuft kurzzeitig ein dritter Pod zusätzlich – garantiert Zero-Downtime-Deploys statt sich auf Rundungsverhalten zu verlassen. |
+| `automountServiceAccountToken` | `false` | Die App braucht keinen Zugriff auf die Kubernetes-API. Kein Service-Account-Token im Pod reduziert die Angriffsfläche (kein Token, das bei einem Container-Escape missbraucht werden könnte) – konsequente Fortsetzung des übrigen Security-Hardenings (`runAsNonRoot`, `readOnlyRootFilesystem`, `capabilities.drop: ["ALL"]`, `seccompProfile`). |
+| `affinity.podAntiAffinity` | `preferredDuringSchedulingIgnoredDuringExecution`, `topologyKey: kubernetes.io/hostname` | Die `PodDisruptionBudget` (`minAvailable: 1`) schützt nur vor freiwilligem Draining, nicht vor einem Node-Ausfall. Anti-Affinity verteilt die beiden Replicas bevorzugt auf unterschiedliche Nodes. `preferred` statt `required`, damit das Scheduling auch bei wenigen verfügbaren Nodes (z. B. lokal/Test-Cluster) nicht blockiert. |
+
+---
+
