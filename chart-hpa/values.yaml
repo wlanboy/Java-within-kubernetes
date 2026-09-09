@@ -12,12 +12,10 @@ replicaCount: 1
 # laeuft, bitte requestsMetric.enabled: false setzen, sonst bleibt der HPA
 # bei "unknown" haengen.
 #
-# Hinweis: minReplicas: 0 ("scale to zero") braucht zusaetzlich zum
-# HPAScaleToZero-Feature-Gate am API-Server (siehe kind-Cluster lokal aktiviert)
-# eine Object- oder External-Metrik, keine Pods-Metrik. requestsMetric wird daher
-# ueber das istio-ingressgateway gemessen (siehe hpa.yaml) statt an den App-Pods,
+# Hinweis: minReplicas: 0 ("scale to zero") braucht zusaetzlich
+# auch eine Object- oder External-Metrik, die auch bei 0 Replicas existiert.
+# requestsMetric wird daher ueber das istio-ingressgateway gemessen,
 # damit sie auch bei 0 Replicas existiert und der HPA wieder hochskalieren kann.
-# Voraussetzung: istio/manifests/hello-world-gateway.yaml ist angewendet.
 autoscaling:
   enabled: true
   minReplicas: 0
@@ -29,15 +27,33 @@ autoscaling:
     enabled: true
     name: http_requests_per_second
     targetAverageValue: "50"
+  # behavior steuert, wie schnell/vorsichtig der HPA auf neue Metrikwerte reagiert:
+  #   stabilizationWindowSeconds: der HPA schaut auf alle Recommendations der
+  #     letzten N Sekunden und nimmt davon das fuer die Scale-Richtung "sicherste"
+  #     (bei scaleUp das Maximum, bei scaleDown das Minimum). 0 = keine Verzoegerung,
+  #     reagiert sofort auf den aktuellen Wert; ein hoeherer Wert glaettet
+  #     kurzfristige Ausschlaege (Flapping), verzoegert die Reaktion aber entsprechend.
+  #   podsPerPeriod / periodSeconds: begrenzt zusaetzlich, wie viele Pods pro
+  #     periodSeconds hoechstens dazu- (scaleUp) bzw. abgebaut (scaleDown) werden
+  #     duerfen. Bei mehreren noetigen Schritten (z.B. 5 -> 0 Replicas) braucht
+  #     der HPA dadurch mehrere Perioden hintereinander, nicht nur eine.
   behavior:
     scaleUp:
+      # sofort reagieren (kein Stabilization-Delay), aber pro 30s hoechstens
+      # 2 neue Pods, damit nicht bei einem kurzen Spitzenwert sofort auf
+      # maxReplicas hochgeschossen wird
       stabilizationWindowSeconds: 0
       podsPerPeriod: 2
       periodSeconds: 30
     scaleDown:
-      stabilizationWindowSeconds: 120
+      # 60s abwarten (nimmt den jeweils niedrigsten Wert aus diesem Fenster),
+      # damit ein kurzer Lastabfall nicht sofort zum Runterskalieren fuehrt;
+      # danach hoechstens 1 Pod pro 30s abbauen, um Requests waehrend des
+      # graceful shutdown (siehe preStopSleepSeconds/terminationGracePeriodSeconds)
+      # nicht auf zu wenige verbleibende Pods zu konzentrieren
+      stabilizationWindowSeconds: 60
       podsPerPeriod: 1
-      periodSeconds: 60
+      periodSeconds: 30
 
 image:
   repository: wlanboy/helloworld
