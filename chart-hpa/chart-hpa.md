@@ -25,7 +25,7 @@ helm install hello-world chart-hpa \
   --namespace default \
   --create-namespace \
   --set image.tag=1.0.0 \
-  --set autoscaling.minReplicas=2 \
+  --set autoscaling.minReplicas=1 \
   --set autoscaling.maxReplicas=8
 ```
 
