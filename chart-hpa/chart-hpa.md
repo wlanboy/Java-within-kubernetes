@@ -74,7 +74,7 @@ kubectl rollout status -n default deployment/hello-world-hpa
 mit Requests bombardieren, und raeumt sie danach automatisch wieder auf:
 
 ```bash
-./chart-hpa/lasttest.sh -n default -s hello-world-hpa -c 10 -d 300
+./chart-hpa/lasttest.sh -n default -s hello-world-hpa -c 10 -d 60
 ```
 
 Parallel dazu in einem zweiten Terminal die Skalierung beobachten:
