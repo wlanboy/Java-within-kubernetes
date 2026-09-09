@@ -1,0 +1,35 @@
+# Routet Traffic ueber das bestehende istio-ingressgateway zu hello-world-hpa.
+# Zweck: istio_requests_total am Gateway erzeugen, damit diese Metrik (unabhaengig
+# von laufenden App-Pods) als Quelle fuer echtes HPA-Scale-to-Zero dienen kann.
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: hello-world-gateway
+  namespace: default
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - "hello-world.local"
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: hello-world-hpa
+  namespace: default
+spec:
+  hosts:
+    - "hello-world.local"
+  gateways:
+    - hello-world-gateway
+  http:
+    - route:
+        - destination:
+            host: hello-world-hpa.default.svc.cluster.local
+            port:
+              number: 80

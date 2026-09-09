@@ -12,18 +12,21 @@ replicaCount: 1
 # laeuft, bitte requestsMetric.enabled: false setzen, sonst bleibt der HPA
 # bei "unknown" haengen.
 #
-# Hinweis: minReplicas: 0 ("scale to zero") wird von einem nativen Kubernetes-HPA
-# nicht unterstuetzt (das HPAScaleToZero-Feature-Gate ist in den meisten Clustern
-# nicht aktiviert). Fuer echtes Scale-to-Zero waere KEDA (ScaledObject) noetig.
+# Hinweis: minReplicas: 0 ("scale to zero") braucht zusaetzlich zum
+# HPAScaleToZero-Feature-Gate am API-Server (siehe kind-Cluster lokal aktiviert)
+# eine Object- oder External-Metrik, keine Pods-Metrik. requestsMetric wird daher
+# ueber das istio-ingressgateway gemessen (siehe hpa.yaml) statt an den App-Pods,
+# damit sie auch bei 0 Replicas existiert und der HPA wieder hochskalieren kann.
+# Voraussetzung: istio/manifests/hello-world-gateway.yaml ist angewendet.
 autoscaling:
   enabled: true
-  minReplicas: 1
+  minReplicas: 0
   maxReplicas: 5
   cpu:
     enabled: true
     targetAverageUtilization: 70
   requestsMetric:
-    enabled: false
+    enabled: true
     name: http_requests_per_second
     targetAverageValue: "50"
   behavior:

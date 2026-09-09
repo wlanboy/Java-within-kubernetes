@@ -24,13 +24,21 @@ spec:
           averageUtilization: {{ .Values.autoscaling.cpu.targetAverageUtilization }}
     {{- end }}
     {{- if .Values.autoscaling.requestsMetric.enabled }}
-    # Custom Metric ueber die Kubernetes custom.metrics.k8s.io API (z.B. via Prometheus Adapter),
-    # die pro Pod die durchschnittliche Anzahl Requests/Sekunde liefert. Benoetigt
-    # zusaetzlich zum metrics-server einen Custom-Metrics-Adapter im Cluster.
-    - type: Pods
-      pods:
+    # Custom Metric ueber die Kubernetes custom.metrics.k8s.io API (Prometheus Adapter),
+    # gemessen am istio-ingressgateway (nicht an den App-Pods!) und dem Service
+    # "hello-world-hpa" zugeordnet. Object-Metrik statt Pods-Metrik, weil eine
+    # Pods-Metrik bei 0 Replicas nicht existieren kann (kein Pod zum Scrapen) und
+    # damit fuer minReplicas: 0 von Kubernetes nicht zugelassen ist. Die
+    # Gateway-Metrik existiert dagegen unabhaengig von laufenden Pods, sodass der
+    # HPA von 0 wieder hochskalieren kann.
+    - type: Object
+      object:
         metric:
           name: {{ .Values.autoscaling.requestsMetric.name }}
+        describedObject:
+          apiVersion: v1
+          kind: Service
+          name: {{ include "hello-world-hpa.fullname" . }}
         target:
           type: AverageValue
           averageValue: {{ .Values.autoscaling.requestsMetric.targetAverageValue | quote }}
