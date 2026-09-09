@@ -1,0 +1,6 @@
+apiVersion: v2
+name: hello-world-hpa
+description: Helm chart fuer den hello-world Spring Boot Service mit HorizontalPodAutoscaler (Skalierung nach Requests)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

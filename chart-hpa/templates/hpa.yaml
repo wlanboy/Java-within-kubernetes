@@ -1,0 +1,51 @@
+{{- if .Values.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "hello-world-hpa.fullname" . }}
+  labels:
+    {{- include "hello-world-hpa.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "hello-world-hpa.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    {{- if .Values.autoscaling.cpu.enabled }}
+    # Resource-Metrik ueber metrics.k8s.io (metrics-server) - sofort ohne weitere
+    # Cluster-Komponenten nutzbar.
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.cpu.targetAverageUtilization }}
+    {{- end }}
+    {{- if .Values.autoscaling.requestsMetric.enabled }}
+    # Custom Metric ueber die Kubernetes custom.metrics.k8s.io API (z.B. via Prometheus Adapter),
+    # die pro Pod die durchschnittliche Anzahl Requests/Sekunde liefert. Benoetigt
+    # zusaetzlich zum metrics-server einen Custom-Metrics-Adapter im Cluster.
+    - type: Pods
+      pods:
+        metric:
+          name: {{ .Values.autoscaling.requestsMetric.name }}
+        target:
+          type: AverageValue
+          averageValue: {{ .Values.autoscaling.requestsMetric.targetAverageValue | quote }}
+    {{- end }}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: {{ .Values.autoscaling.behavior.scaleUp.stabilizationWindowSeconds }}
+      policies:
+        - type: Pods
+          value: {{ .Values.autoscaling.behavior.scaleUp.podsPerPeriod }}
+          periodSeconds: {{ .Values.autoscaling.behavior.scaleUp.periodSeconds }}
+    scaleDown:
+      stabilizationWindowSeconds: {{ .Values.autoscaling.behavior.scaleDown.stabilizationWindowSeconds }}
+      policies:
+        - type: Pods
+          value: {{ .Values.autoscaling.behavior.scaleDown.podsPerPeriod }}
+          periodSeconds: {{ .Values.autoscaling.behavior.scaleDown.periodSeconds }}
+{{- end }}

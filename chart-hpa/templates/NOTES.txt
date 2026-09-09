@@ -1,0 +1,22 @@
+{{ include "hello-world-hpa.fullname" . }} wurde in Namespace {{ .Release.Namespace }} deployed.
+
+Rollout-Status pruefen:
+  kubectl rollout status -n {{ .Release.Namespace }} deployment/{{ include "hello-world-hpa.fullname" . }}
+
+Service erreichen (Port-Forward):
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "hello-world-hpa.fullname" . }} 8080:{{ .Values.service.port }}
+{{- if .Values.autoscaling.enabled }}
+
+HPA-Status pruefen:
+  kubectl get hpa -n {{ .Release.Namespace }} {{ include "hello-world-hpa.fullname" . }} -w
+
+Hinweis: Skaliert zwischen {{ .Values.autoscaling.minReplicas }} und {{ .Values.autoscaling.maxReplicas }} Replicas anhand:
+{{- if .Values.autoscaling.cpu.enabled }}
+  - CPU-Auslastung (Ziel: {{ .Values.autoscaling.cpu.targetAverageUtilization }}%), ueber metrics-server (metrics.k8s.io).
+{{- end }}
+{{- if .Values.autoscaling.requestsMetric.enabled }}
+  - Custom-Metrik "{{ .Values.autoscaling.requestsMetric.name }}" (Ziel: {{ .Values.autoscaling.requestsMetric.targetAverageValue }} Requests/s pro Pod im Durchschnitt).
+    Diese Metrik muss ueber die custom.metrics.k8s.io API bereitgestellt werden (z.B. Prometheus Adapter).
+    Ohne diese API bleibt der HPA im Status "unknown" - dann autoscaling.requestsMetric.enabled: false setzen.
+{{- end }}
+{{- end }}
