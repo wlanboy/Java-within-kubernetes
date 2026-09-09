@@ -1,0 +1,155 @@
+nameOverride: ""
+fullnameOverride: ""
+
+replicaCount: 1
+
+image:
+  repository: wlanboy/helloworld
+  tag: latest
+  pullPolicy: Always
+
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8081"
+  prometheus.io/path: "/actuator/prometheus"
+
+terminationGracePeriodSeconds: 40
+automountServiceAccountToken: false
+
+podAntiAffinity:
+  enabled: true
+  weight: 100
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+service:
+  type: ClusterIP
+  port: 80
+
+ports:
+  http: 8080
+  management: 8081
+
+env:
+  TZ: "Europe/Berlin"
+  SPRING_CONFIG_ADDITIONAL_LOCATION: "optional:file:/config/"
+
+javaOpts: >-
+  -Djava.security.egd=file:/dev/./urandom
+  -XX:+ExitOnOutOfMemoryError
+  -XX:MaxRAMPercentage=70.0
+  -XX:InitialRAMPercentage=70.0
+  -XX:MaxMetaspaceSize=96m
+  -XX:MaxDirectMemorySize=32m
+  -XX:-UsePerfData
+  -XX:+UseSerialGC
+  -XX:ActiveProcessorCount=1
+  -XX:TieredStopAtLevel=1
+  -Dspring.aot.enabled=true
+
+resources:
+  requests:
+    cpu: "250m"
+    memory: "256Mi"
+    ephemeral-storage: "128Mi"
+  limits:
+    cpu: "1"
+    memory: "512Mi"
+    ephemeral-storage: "256Mi"
+
+startupProbe:
+  path: /actuator/health/readiness
+  port: management
+  failureThreshold: 30
+  periodSeconds: 2
+  timeoutSeconds: 5
+
+readinessProbe:
+  path: /actuator/health/readiness
+  port: management
+  initialDelaySeconds: 0
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+livenessProbe:
+  path: /actuator/health/liveness
+  port: management
+  initialDelaySeconds: 0
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+preStopSleepSeconds: 5
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# application.properties Inhalt fuer die ConfigMap (siehe manifests/configmap.yaml)
+config: |
+  # --- Server ---
+  server.shutdown=graceful
+  server.http2.enabled=true
+
+  # --- Tomcat: klein gehalten, weil der Pod nur 1 CPU-Core zugewiesen bekommt
+  # und zusaetzlich ein Istio-Sidecar auf demselben Node/Pod mitlaeuft.
+  # server.tomcat.threads.max=200 (Default)
+  server.tomcat.threads.max=20
+  # server.tomcat.max-connections=8192 (Default)
+  server.tomcat.max-connections=512
+  # Anzahl der Requests, die in die Warteschlange duerfen, bevor Verbindungen abgelehnt werden
+  server.tomcat.accept-count=100
+  # Anzahl der Processor-Objekte, die Tomcat zur Wiederverwendung vorhaelt (Default: 200)
+  server.tomcat.processor-cache=200
+  # Bei threads.max=20 reichen wenige Idle-Threads (Default: 10)
+  server.tomcat.threads.min-spare=5
+
+  # --- Timeouts: kurz halten, damit offene Keep-Alive-Verbindungen den graceful shutdown
+  # (preStop-sleep von nur 5s, siehe Deployment) nicht verzoegern
+  # server.tomcat.connection-timeout=20s (Default)
+  server.tomcat.connection-timeout=5s
+  server.tomcat.keep-alive-timeout=15s
+  # Begrenzt Requests pro Keep-Alive-Verbindung (Default: 100). Bei nur 2 Replicas
+  # sorgt ein niedrigerer Wert fuer periodische Reconnects, damit eine einzelne
+  # lang gehaltene Verbindung nicht dauerhaft denselben Pod bindet
+  server.tomcat.max-keep-alive-requests=50
+
+  # --- Hinter dem Istio-Sidecar: X-Forwarded-* Header vom Spring-Framework auswerten lassen,
+  # damit Client-IP/Schema/Host in Logs und generierten URLs korrekt ankommen
+  server.forward-headers-strategy=framework
+
+  # --- JMX-Registrierung der Tomcat-MBeans abschalten: spart etwas Startzeit/Speicher,
+  # da kein JMX-Monitoring genutzt wird (Metriken laufen ueber Actuator/Prometheus)
+  server.tomcat.mbeanregistry.enabled=false
+
+  # --- Graceful shutdown: Zeitfenster muss zum terminationGracePeriodSeconds im Deployment passen ---
+  spring.lifecycle.timeout-per-shutdown-phase=30s
+
+  # --- Actuator auf eigenem Port: Health/Metrics/Prometheus sind damit nicht ueber
+  # den Kubernetes-Service/Istio erreichbar, sondern nur direkt auf dem Pod (Probes
+  # und Prometheus-Scrape gehen an der Pod-IP vorbei am Service) ---
+  management.server.port=8081
+
+  # --- Actuator: fuer Kubernetes Liveness-/Readiness-Probes ---
+  management.endpoints.web.exposure.include=health,info,prometheus
+  management.endpoint.health.probes.enabled=true
+  management.health.livenessstate.enabled=true
+  management.health.readinessstate.enabled=true
+  # verhindert, dass interne Detail-Infos (DB-Status, Disk-Space etc.) ueber
+  # /actuator/health nach aussen sichtbar werden, falls der Endpoint doch erreichbar ist
+  management.endpoint.health.show-details=never
+  # taggt alle Prometheus-Metriken mit dem App-Namen, damit sich die Serien in
+  # Prometheus/Grafana bei mehreren Deployments sauber unterscheiden lassen
+  management.metrics.tags.application=hello-world
