@@ -145,6 +145,18 @@ livenessProbe:
 
 preStopSleepSeconds: 5
 
+# PodDisruptionBudget: begrenzt, wie viele Pods bei freiwilligen Disruptions
+# (Node-Drain, Cluster-Autoscaler-Downscale, kubectl evict) gleichzeitig
+# entfernt werden duerfen. Schuetzt NICHT vor Pod-Crashes/OOM-Kills, nur vor
+# absichtlichen/geplanten Aktionen.
+# HPA-Skalierung (auch scale-to-zero via autoscaling.minReplicas: 0) ist davon
+# NICHT betroffen, da der ReplicaSet-Controller die Pods dabei direkt loescht
+# und nicht ueber die Eviction-API geht, die die PDB durchsetzt.
+# Achtung trotzdem: minAvailable muss kleiner als die aktuelle Replica-Zahl
+# sein, sonst wird jede freiwillige Disruption blockiert. Sobald der HPA
+# (z.B. nach dem Hochskalieren aus 0) nur 1 Pod faehrt, verhindert
+# minAvailable: 1 damit jeden Node-Drain dieses einen Pods, bis erneut
+# hochskaliert wurde.
 podDisruptionBudget:
   enabled: true
   minAvailable: 1
