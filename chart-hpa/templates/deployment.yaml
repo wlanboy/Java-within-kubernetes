@@ -15,12 +15,13 @@ spec:
       maxSurge: 1
   selector:
     matchLabels:
-      {{- include "hello-world-hpa.labels" . | nindent 6 }}
+      {{- include "hello-world-hpa.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       labels:
         {{- include "hello-world-hpa.labels" . | nindent 8 }}
       annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -35,7 +36,7 @@ spec:
               podAffinityTerm:
                 labelSelector:
                   matchLabels:
-                    {{- include "hello-world-hpa.labels" . | nindent 20 }}
+                    {{- include "hello-world-hpa.selectorLabels" . | nindent 20 }}
                 topologyKey: kubernetes.io/hostname
       {{- end }}
       securityContext:

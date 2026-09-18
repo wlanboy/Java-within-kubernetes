@@ -9,5 +9,5 @@ spec:
   minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
   selector:
     matchLabels:
-      {{- include "hello-world-hpa.labels" . | nindent 6 }}
+      {{- include "hello-world-hpa.selectorLabels" . | nindent 6 }}
 {{- end }}

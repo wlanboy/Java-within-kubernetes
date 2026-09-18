@@ -11,6 +11,10 @@
 {{- end -}}
 {{- end -}}
 
-{{- define "hello-world.labels" -}}
+{{- define "hello-world.selectorLabels" -}}
 app: {{ include "hello-world.fullname" . }}
+{{- end -}}
+
+{{- define "hello-world.labels" -}}
+{{ include "hello-world.selectorLabels" . }}
 {{- end -}}

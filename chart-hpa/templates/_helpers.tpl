@@ -11,6 +11,10 @@
 {{- end -}}
 {{- end -}}
 
-{{- define "hello-world-hpa.labels" -}}
+{{- define "hello-world-hpa.selectorLabels" -}}
 app: {{ include "hello-world-hpa.fullname" . }}
+{{- end -}}
+
+{{- define "hello-world-hpa.labels" -}}
+{{ include "hello-world-hpa.selectorLabels" . }}
 {{- end -}}
