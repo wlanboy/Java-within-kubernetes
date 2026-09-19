@@ -1,0 +1,65 @@
+# Werte fuer den offiziellen kedacore/keda Helm-Chart (Operator-Installation,
+# siehe keda-setup.md). Gegen Chart-Version 2.20.2 (per "helm show values
+# kedacore/keda --version 2.20.2") abgeglichen - bei Update auf eine neuere
+# Major-Version erneut pruefen, das Werte-Schema kann sich aendern.
+
+# Beschraenkt den Operator auf den "default"-Namespace, in dem hello-world-keda
+# laeuft. Leerer String ("") wuerde clusterweit alle Namespaces beobachten -
+# in diesem Cluster mit nur einer App unnoetig breite RBAC-Rechte.
+watchNamespace: "default"
+
+resources:
+  operator:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "1"
+      memory: "1000Mi"
+  metricServer:
+    requests:
+      cpu: "50m"
+      memory: "64Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+# Operator-eigene Metriken (Anzahl ScaledObjects, Trigger-Fehler etc.) fuer
+# Prometheus exponieren - nuetzlich zum Debuggen, wenn ein ScaledObject nicht
+# wie erwartet skaliert. Das ist getrennt von der PromQL-Query, die das
+# ScaledObject in chart-keda selbst gegen Prometheus stellt.
+# Hinweis: im aktuell erreichbaren Cluster laeuft noch KEIN Prometheus (nur
+# istiod + istio-ingressgateway + metrics-server sind installiert) - diese
+# Metriken werden also aktuell von niemandem gescraped. Das Aktivieren ist
+# trotzdem unschaedlich (exponiert nur einen zusaetzlichen Port) und macht
+# Sinn, sobald Prometheus nachgeruestet wird - fuer den CPU-Trigger in
+# chart-keda reicht der bereits laufende metrics-server aus, fuer den
+# Prometheus-Trigger fehlt aktuell aber der Server, den die ScaledObject-Query
+# abfragen soll (siehe chart-keda/values.yaml: keda.triggers.prometheus).
+prometheus:
+  metricServer:
+    enabled: true
+  operator:
+    enabled: true
+
+# Security-Context ist im Chart pro Pod (operator/metricServer/webhooks)
+# verschachtelt, kein flaches Top-Level-Feld - siehe "helm show values
+# kedacore/keda --version 2.20.2". webhooks bleibt bewusst beim
+# Chart-Default (identische Werte), da hier keine Anpassung noetig ist.
+podSecurityContext:
+  operator:
+    runAsNonRoot: true
+  metricServer:
+    runAsNonRoot: true
+
+securityContext:
+  operator:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+  metricServer:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
