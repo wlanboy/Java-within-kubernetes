@@ -38,7 +38,7 @@ autoscaling:
   requestsMetric:
     enabled: true
     name: http_requests_per_second
-    targetAverageValue: "50"
+    targetAverageValue: "5"
   # behavior steuert, wie schnell/vorsichtig der HPA auf neue Metrikwerte reagiert:
   #   stabilizationWindowSeconds: der HPA schaut auf alle Recommendations der
   #     letzten N Sekunden und nimmt davon das fuer die Scale-Richtung "sicherste"
