@@ -23,6 +23,8 @@ kubectl label namespace default istio-injection=enabled
 helm install hello-world chart-hpa \
   --namespace default \
   --create-namespace
+
+helm status hello-world --namespace default
 ```
 
 Mit angepassten Werten (z. B. Image-Tag, Autoscaling-Grenzen):
@@ -89,6 +91,15 @@ Parallel dazu in einem zweiten Terminal die Skalierung beobachten:
 ```bash
 kubectl get hpa -n default hello-world-hpa -w
 kubectl top pods -n default -l app=hello-world-hpa
+```
+
+`kubectl get hpa -w` zeigt den Metrikwert nur relativ zum Target (`<current>/<target>`)
+und oft `<unknown>`, solange kein Pod läuft. Den rohen Wert, den der Prometheus Adapter
+für die Object-Metrik `http_requests_per_second` (gemessen am Service `hello-world-hpa`,
+siehe [templates/hpa.yaml](templates/hpa.yaml)) an die Custom-Metrics-API liefert, direkt abfragen:
+
+```bash
+kubectl get --raw "/apis/custom.metrics.k8s.io/v1beta1/namespaces/default/services/hello-world-hpa/http_requests_per_second" | jq .
 ```
 
 ## Zugriff über das Istio Gateway
