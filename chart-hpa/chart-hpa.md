@@ -102,6 +102,48 @@ siehe [templates/hpa.yaml](templates/hpa.yaml)) an die Custom-Metrics-API liefer
 kubectl get --raw "/apis/custom.metrics.k8s.io/v1beta1/namespaces/default/services/hello-world-hpa/http_requests_per_second" | jq .
 ```
 
+Die `SuccessfulRescale`-Events des HPA (mit Zeitstempel und alter/neuer Replica-Zahl)
+zeigen, wann und wie oft der HPA tatsächlich skaliert hat:
+
+```bash
+kubectl get events -n default \
+  --field-selector involvedObject.name=hello-world-hpa,involvedObject.kind=HorizontalPodAutoscaler,reason=SuccessfulRescale \
+  --sort-by='.lastTimestamp'
+```
+
+### Scale-up/Scale-down Dauer messen
+
+Statt die Zeit manuell an der Uhr abzulesen, in einem dritten Terminal parallel zum
+Lasttest mitlaufen lassen. Scale-up: vor bzw. beim Start von `lasttest.sh` starten,
+wartet bis die erste Replica `Ready` ist:
+
+```bash
+start=$(date +%s)
+until [ "$(kubectl get deploy -n default hello-world-hpa -o jsonpath='{.status.readyReplicas}')" -ge 1 ] 2>/dev/null; do
+  sleep 1
+done
+echo "Scale-up: $(( $(date +%s) - start ))s bis 1. Replica Ready"
+```
+
+Scale-down: nach Ende von `lasttest.sh` starten, wartet bis wieder 0 Replicas übrig sind:
+
+```bash
+start=$(date +%s)
+until [ "$(kubectl get deploy -n default hello-world-hpa -o jsonpath='{.status.readyReplicas}')" = "0" ]; do
+  sleep 1
+done
+echo "Scale-down: $(( $(date +%s) - start ))s bis 0 Replicas"
+```
+
+Alternativ die `SuccessfulRescale`-Events des HPA (mit Zeitstempel und alter/neuer
+Replica-Zahl) direkt einsehen:
+
+```bash
+kubectl get events -n default \
+  --field-selector involvedObject.name=hello-world-hpa,involvedObject.kind=HorizontalPodAutoscaler,reason=SuccessfulRescale \
+  --sort-by='.lastTimestamp'
+```
+
 ## Zugriff über das Istio Gateway
 
 Wenn `istio.gateway.enabled=true` ist (Default), wird der Service über das bestehende
@@ -147,9 +189,16 @@ Praktische Konsequenz: Aufrufer, die gegen einen potenziell schlafenden (scale-t
 Service laufen, müssen **selbst retryen**, z. B.:
 
 ```bash
-curl --retry 5 --retry-all-errors --retry-delay 3 \
+curl -f --retry 5 --retry-all-errors --retry-delay 3 \
   -H "Host: hello-world.gmk.lan" "http://192.168.178.81/hello"
 ```
+
+**Wichtig: `-f`/`--fail` nicht vergessen.** curl behandelt HTTP-Statuscodes wie 503
+standardmäßig nicht als Fehler (nur Verbindungsprobleme wie Timeout oder Connection
+Refused) – `--retry`/`--retry-all-errors` greifen dann nie, und curl gibt nach dem
+ersten 503 sofort auf. Gemessen: ohne `-f` liefert curl bei 0 Replicas nach ~0.5ms
+(ein einzelner, nicht wiederholter Request) den 503 als "erfolgreichen" Abschluss
+zurück. Erst mit `-f` zählt curl den 503 als Fehler und wiederholt den Request.
 
 Bleibt der Fehler dauerhaft bestehen (auch nachdem ein Pod längst laufen sollte), mit
 `kubectl describe hpa -n default hello-world-hpa` prüfen, ob die Custom-Metrics-API
@@ -191,6 +240,27 @@ der HPA überhaupt merkt, dass wieder Traffic da ist. Das hängt vom Prometheus
 HPA-Sync-Period des `kube-controller-manager` (Cluster-Default 15s) ab – zusammen oft
 15–30s, bevor der HPA überhaupt reagiert. Das lässt sich nur clusterweit (nicht pro
 Chart/Release) verkürzen.
+
+**Konkret gefunden (Relist-Interval des Prometheus Adapters):** Bei 0 Replicas
+verschwindet die Object-Metrik `http_requests_per_second` aus der Custom-Metrics-API
+(`kubectl describe hpa` zeigt dann `FailedGetObjectMetric: ... could not find the
+metric ... for services`), weil der Adapter nur alle `--metrics-relist-interval`
+neu prüft, welche Metriken/Serien aktuell existieren. Mit dem Standardwert `1m`
+kann das bis zu 60s zusätzliche Verzögerung bedeuten, bevor der HPA einen Wert > 0
+überhaupt sehen kann. Angepasst auf dieser Umgebung (Deployment
+`prometheus-adapter` im Namespace `monitoring`):
+
+```bash
+kubectl -n monitoring patch deployment prometheus-adapter --type='json' \
+  -p='[{"op":"replace","path":"/spec/template/spec/containers/0/args/3","value":"--metrics-relist-interval=10s"}]'
+```
+
+Hinweis zum Nachmessen: Die Adapter-Regel für `http_requests_per_second` verwendet
+ein `rate(...[2m])`-Fenster (siehe ConfigMap `prometheus-adapter-config`). Traffic
+aus einem vorangegangenen Testlauf bleibt dadurch bis zu 2 Minuten lang im Fenster
+sichtbar und verfälscht die nächste Scale-up-Messung. Zwischen zwei Messläufen also
+mindestens 2 Minuten ohne Traffic abwarten (bzw. mit dem `SuccessfulRescale`-Event
+auf `New size: 0` prüfen, siehe oben), nicht direkt nacheinander testen.
 
 ## Status & Debugging
 
