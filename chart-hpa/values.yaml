@@ -16,6 +16,11 @@ replicaCount: 1
 # auch eine Object- oder External-Metrik, die auch bei 0 Replicas existiert.
 # requestsMetric wird daher ueber das istio-ingressgateway gemessen,
 # damit sie auch bei 0 Replicas existiert und der HPA wieder hochskalieren kann.
+#
+# Zusaetzlich muss auf dem kube-apiserver das Feature-Gate HPAScaleToZero=true
+# aktiv sein, sonst lehnt der Kubernetes-API-Server minReplicas: 0 mit
+# "must be greater than or equal to 1" ab (siehe k3s_setup_server.py im
+# raspberrypi-Repo: --kube-apiserver-arg=feature-gates=HPAScaleToZero=true).
 autoscaling:
   enabled: true
   minReplicas: 0
@@ -89,6 +94,15 @@ containerSecurityContext:
 service:
   type: ClusterIP
   port: 80
+
+# Istio Gateway + VirtualService: erzeugt istio_requests_total am
+# istio-ingressgateway, damit diese Metrik (unabhaengig von laufenden App-Pods)
+# als Object-Metrik fuer echtes HPA-Scale-to-Zero dienen kann (siehe
+# autoscaling.requestsMetric und templates/hpa.yaml).
+istio:
+  gateway:
+    enabled: true
+    host: "hello-world.local"
 
 ports:
   http: 8080

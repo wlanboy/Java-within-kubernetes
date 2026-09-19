@@ -1,0 +1,39 @@
+{{- if .Values.istio.gateway.enabled }}
+# Routet Traffic ueber das bestehende istio-ingressgateway zu {{ include "hello-world-hpa.fullname" . }}.
+# Zweck: istio_requests_total am Gateway erzeugen, damit diese Metrik (unabhaengig
+# von laufenden App-Pods) als Quelle fuer echtes HPA-Scale-to-Zero dienen kann.
+apiVersion: networking.istio.io/v1
+kind: Gateway
+metadata:
+  name: {{ include "hello-world-hpa.fullname" . }}-gateway
+  labels:
+    {{- include "hello-world-hpa.labels" . | nindent 4 }}
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - {{ .Values.istio.gateway.host | quote }}
+---
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: {{ include "hello-world-hpa.fullname" . }}
+  labels:
+    {{- include "hello-world-hpa.labels" . | nindent 4 }}
+spec:
+  hosts:
+    - {{ .Values.istio.gateway.host | quote }}
+  gateways:
+    - {{ include "hello-world-hpa.fullname" . }}-gateway
+  http:
+    - route:
+        - destination:
+            host: {{ include "hello-world-hpa.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+            port:
+              number: {{ .Values.service.port }}
+{{- end }}
