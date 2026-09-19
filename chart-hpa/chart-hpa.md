@@ -170,97 +170,73 @@ kubectl -n istio-ingress port-forward svc/istio-ingressgateway 8080:80
 curl -H "Host: hello-world.local" "http://localhost:8080/hello"
 ```
 
-Das erzeugt `istio_requests_total` am Gateway und dient so – auch ohne laufende App-Pods –
+Das erzeugt `istio_requests_total` am Gateway und dient so, auch ohne laufende App-Pods,
 als Quelle für das HPA-Scale-to-Zero.
 
-**"no healthy upstream" bei 0 Replicas:**
-Der Chart enthält keinen Queue-Proxy/Activator (wie z. B. Knative), der Requests puffert,
-während der Pod hochfährt. Bei `minReplicas: 0` und 0 laufenden Pods hat der
-Kubernetes-Service keine Endpoints (`kubectl get endpoints -n default hello-world-hpa`
-zeigt keine `subsets`). Envoy kann dann beim allerersten Schritt (Host-Auswahl) gar keinen
-Host wählen und gibt **sofort synchron** `503 no healthy upstream` zurück – das ist kein
-Timeout, sondern ein lokaler Fehler *vor* jeder Netzwerk-Anfrage. Die Retry-Policy
-(`istio.gateway.retries`) greift hier **nicht**: sie hilft nur, wenn Hosts vorhanden, aber
-(temporär) ungesund sind (z. B. während eines Rolling-Updates), nicht wenn der Cluster
-komplett leer ist. Gemessen: curl gegen einen 0-Replica-Service liefert den 503 in ~15ms,
-nicht nach den konfigurierten ~15s Retry-Budget.
+## Zeitmessungen
 
-Praktische Konsequenz: Aufrufer, die gegen einen potenziell schlafenden (scale-to-zero)
-Service laufen, müssen **selbst retryen**, z. B.:
+Neben der Stopwatch-Methode (siehe [Scale-up/Scale-down Dauer messen](#scale-updown-dauer-messen))
+zeigen die Kubernetes-Events die komplette Melde-Kette hinter einem Scale-up/Scale-down
+und helfen, eine gemessene Verzögerung einer Stufe zuzuordnen (Metrik-Pipeline vs.
+Pod-Start vs. Termination), statt nur die Gesamtzeit zu kennen.
 
-```bash
-curl -f --retry 5 --retry-all-errors --retry-delay 3 \
-  -H "Host: hello-world.gmk.lan" "http://192.168.178.81/hello"
-```
+### Scale-up: Melde-Kette
 
-**Wichtig: `-f`/`--fail` nicht vergessen.** curl behandelt HTTP-Statuscodes wie 503
-standardmäßig nicht als Fehler (nur Verbindungsprobleme wie Timeout oder Connection
-Refused) – `--retry`/`--retry-all-errors` greifen dann nie, und curl gibt nach dem
-ersten 503 sofort auf. Gemessen: ohne `-f` liefert curl bei 0 Replicas nach ~0.5ms
-(ein einzelner, nicht wiederholter Request) den 503 als "erfolgreichen" Abschluss
-zurück. Erst mit `-f` zählt curl den 503 als Fehler und wiederholt den Request.
+1. **Metrik-Pipeline** – keine einzelnen Events, sondern die Zeit bis zur Scale-Entscheidung,
+   verteilt über mehrere unabhängige Instanzen. Startpunkt zum Messen ist der erste Wert
+   `> 0` aus der Custom-Metrics-API (siehe oben):
+   - **Prometheus** (`scrape_interval: 15s`, ConfigMap `prometheus-config` im Namespace
+     `monitoring`). Wie oft neue Traffic-Samples überhaupt erfasst werden.
+   - **Prometheus Adapter** (`--metrics-relist-interval=10s`, Deployment
+     `prometheus-adapter` im Namespace `monitoring`). Wie oft der Adapter neu prüft,
+     welche Metrik-Zeitreihen aktuell existieren.
+   - **Prometheus Adapter** (`rate(...[1m])` in der Adapter-Regel, ConfigMap
+     `prometheus-adapter-config` im Namespace `monitoring`). Größe des Zeitfensters,
+     über das die Rate gemittelt wird; bestimmt, wie schnell ein neuer Traffic-Ausschlag
+     den gemittelten Wert über das Target hebt.
+   - **`kube-controller-manager`** (kein explizites `--horizontal-pod-autoscaler-sync-period`
+     gesetzt → Kubernetes-Default `15s`) – wie oft der HPA-Controller die
+     Custom-Metrics-API überhaupt abfragt und eine Scale-Entscheidung trifft.
+2. **Pod `Scheduled`** – Node zugewiesen.
+3. **Pod `Pulled`** (pro Container: erst `istio-proxy`, dann App-Container) – Image
+   lokal vorhanden oder nachgeladen. `already present on machine` = kein Pull-Overhead,
+   sonst zusätzlicher Registry-Roundtrip.
+4. **Pod `Created` / `Started`** – Container-Runtime hat den Prozess gestartet.
+5. **Pod `Unhealthy` (`Startup probe failed`)** – in den ersten Sekunden **normal**,
+   solange die App noch bootet (JVM-/Spring-Context-Init). Kein Fehler, sondern
+   erwartetes Verhalten bis zur ersten erfolgreichen Probe.
+6. Kein eigenes "Ready"-Event: der Zeitpunkt "ready" ergibt sich erst daraus, dass
+   keine weiteren `Unhealthy`-Events mehr kommen bzw. aus `readyReplicas` im
+   Deployment-Status (siehe Stopwatch-Snippet oben).
 
-Bleibt der Fehler dauerhaft bestehen (auch nachdem ein Pod längst laufen sollte), mit
-`kubectl describe hpa -n default hello-world-hpa` prüfen, ob die Custom-Metrics-API
-(`http_requests_per_second`) überhaupt Werte liefert (Event `FailedGetObjectMetric`
-deutet auf ein Problem mit dem Prometheus Adapter hin).
+**HPA `SuccessfulRescale`** (`New size: N; reason: external metric ... above target`)
+markiert den Übergang zwischen Punkt 1 und Punkt 2 – das Ende der Metrik-Pipeline und
+den Start der eigentlichen Pod-Erzeugung.
 
-**Nicht manuell `kubectl scale --replicas=0` zum Testen verwenden:** Ein von außen (nicht
-vom HPA selbst) auf 0 gesetztes Deployment bringt den HPA-internen Zustand durcheinander –
-er skaliert dann auch bei echtem Traffic nicht mehr automatisch hoch und bleibt bei
-`ScalingActive: False, Reason: ScalingDisabled` hängen, obwohl das Feature-Gate korrekt
-gesetzt ist. Überlässt man dem HPA den kompletten Zyklus selbst (herunterskalieren lassen,
-statt es zu erzwingen), funktioniert Scale-to-Zero zuverlässig: gemessen wurden ca. 15s von
-Traffic-Beginn bis der Pod `2/2 Running` ist. Zum Testen also echten Traffic stoppen/senden
-lassen (siehe [Lasttest](#lasttest-hpa-testen)) statt `kubectl scale` zu benutzen.
+### Scale-down: Melde-Kette
 
-## Scale-up beschleunigen
+1. **HPA `SuccessfulRescale`** (`New size: N; reason: All metrics below target`)
+2. **Pod `Killing`** (zwei Einträge – `istio-proxy` und App-Container) – Beginn der
+   Terminierung.
+3. `readyReplicas` fällt auf 0, sobald der letzte Pod vollständig entfernt ist; dafür
+   gibt es kein separates "Terminated"-Event, `readyReplicas` ist hier der verlässliche
+   Marker (siehe Stopwatch-Snippet oben).
 
-Zeit von "0 Replicas" bis "Request wird bedient" setzt sich aus mehreren Faktoren
-zusammen. Folgende Chart-seitige Hebel sind bereits gesetzt bzw. stehen zur Verfügung:
-
-- **`istio.gateway.retries`** (aktiv, `attempts: 5`, `perTryTimeout: 3s`): hilft bei
-  kurzzeitig ungesunden, aber vorhandenen Hosts (z. B. während eines Rolling-Updates).
-  Bei echten 0 Replicas (leerer Service, keine Endpoints) greift das **nicht** – Envoy
-  scheitert dann synchron bei der Host-Auswahl, bevor die Retry-Logik ausgeführt wird
-  (siehe Hinweis oben). Für den Scale-to-Zero-Fall ist Client-seitiger Retry nötig.
-- **`image.pullPolicy: IfNotPresent`** (statt `Always`): kein Registry-Roundtrip mehr
-  bei jedem Scale-up, wenn das Image bereits auf dem Node liegt. Achtung bei Tag
-  `latest`: ein neu gepushtes Image wird dadurch nicht automatisch geholt (siehe
-  Kommentar in `values.yaml`).
-- **`startupProbe.periodSeconds: 1`** (statt 2): der Pod wird im Schnitt ~0.5s früher
-  als "ready" erkannt, sobald er es tatsächlich ist.
-- **`autoscaling.behavior.scaleUp`**: bereits ohne Stabilization-Delay
-  (`stabilizationWindowSeconds: 0`), reagiert also sofort auf einen Metrikwert über dem
-  Ziel.
-
-**Nicht über diesen Chart steuerbar, aber oft der größte Anteil der Latenz:** wie schnell
-der HPA überhaupt merkt, dass wieder Traffic da ist. Das hängt vom Prometheus
-`scrape_interval`, dem Relist-/Query-Intervall des Prometheus Adapters und der
-HPA-Sync-Period des `kube-controller-manager` (Cluster-Default 15s) ab – zusammen oft
-15–30s, bevor der HPA überhaupt reagiert. Das lässt sich nur clusterweit (nicht pro
-Chart/Release) verkürzen.
-
-**Konkret gefunden (Relist-Interval des Prometheus Adapters):** Bei 0 Replicas
-verschwindet die Object-Metrik `http_requests_per_second` aus der Custom-Metrics-API
-(`kubectl describe hpa` zeigt dann `FailedGetObjectMetric: ... could not find the
-metric ... for services`), weil der Adapter nur alle `--metrics-relist-interval`
-neu prüft, welche Metriken/Serien aktuell existieren. Mit dem Standardwert `1m`
-kann das bis zu 60s zusätzliche Verzögerung bedeuten, bevor der HPA einen Wert > 0
-überhaupt sehen kann. Angepasst auf dieser Umgebung (Deployment
-`prometheus-adapter` im Namespace `monitoring`):
+### Beide Ketten gemeinsam auswerten
 
 ```bash
-kubectl -n monitoring patch deployment prometheus-adapter --type='json' \
-  -p='[{"op":"replace","path":"/spec/template/spec/containers/0/args/3","value":"--metrics-relist-interval=10s"}]'
+kubectl get events -n default \
+  --field-selector involvedObject.name=hello-world-hpa,involvedObject.kind=HorizontalPodAutoscaler,reason=SuccessfulRescale \
+  --sort-by='.lastTimestamp'
+
+kubectl get events -n default --field-selector involvedObject.kind=Pod --sort-by='.lastTimestamp' \
+  | grep hello-world-hpa
 ```
 
-Hinweis zum Nachmessen: Die Adapter-Regel für `http_requests_per_second` verwendet
-ein `rate(...[2m])`-Fenster (siehe ConfigMap `prometheus-adapter-config`). Traffic
-aus einem vorangegangenen Testlauf bleibt dadurch bis zu 2 Minuten lang im Fenster
-sichtbar und verfälscht die nächste Scale-up-Messung. Zwischen zwei Messläufen also
-mindestens 2 Minuten ohne Traffic abwarten (bzw. mit dem `SuccessfulRescale`-Event
-auf `New size: 0` prüfen, siehe oben), nicht direkt nacheinander testen.
+Die Differenz zwischen dem ersten Wert `> 0` aus der Custom-Metrics-API (siehe oben)
+und `SuccessfulRescale` ist die Metrik-Pipeline-Latenz. Die Differenz zwischen
+`SuccessfulRescale` und dem letzten `Unhealthy`-Event (danach: ready) ist die reine
+Pod-/App-Startzeit.
 
 ## Status & Debugging
 
