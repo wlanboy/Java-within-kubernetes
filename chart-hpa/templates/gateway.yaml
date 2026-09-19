@@ -40,4 +40,10 @@ spec:
             host: {{ include "hello-world-hpa.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
             port:
               number: {{ .Values.service.port }}
+      {{- if .Values.istio.gateway.retries.enabled }}
+      retries:
+        attempts: {{ .Values.istio.gateway.retries.attempts }}
+        perTryTimeout: {{ .Values.istio.gateway.retries.perTryTimeout | quote }}
+        retryOn: {{ .Values.istio.gateway.retries.retryOn | quote }}
+      {{- end }}
 {{- end }}

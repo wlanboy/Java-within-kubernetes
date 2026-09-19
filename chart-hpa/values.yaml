@@ -70,7 +70,7 @@ autoscaling:
 image:
   repository: wlanboy/helloworld
   tag: latest
-  pullPolicy: Always
+  pullPolicy: IfNotPresent
 
 podAnnotations:
   prometheus.io/scrape: "true"
@@ -112,6 +112,19 @@ istio:
     hosts:
       - "hello-world.local"
       - "hello-world.gmk.lan"
+    # Retries am Envoy-Gateway: faengt Requests ab, die waehrend eines
+    # Scale-up-aus-0 auf "503 no healthy upstream" laufen, weil noch kein
+    # Pod bereit ist. Envoy wiederholt den Request automatisch, bis entweder
+    # ein Pod ready ist oder das Retry-Budget (attempts * perTryTimeout)
+    # aufgebraucht ist. Deckt NICHT jeden Cold-Start ab: Metrik-Latenz
+    # (Prometheus-Scrape + Adapter + HPA-Sync-Period) plus Pod-Start koennen
+    # laenger dauern als das Budget - dann bleibt ein 503 beim Client, ein
+    # erneuter Retry auf Client-Seite hilft dann i.d.R. schon.
+    retries:
+      enabled: true
+      attempts: 5
+      perTryTimeout: "3s"
+      retryOn: "503,connect-failure,refused-stream"
 
 ports:
   http: 8080
@@ -147,8 +160,11 @@ resources:
 startupProbe:
   path: /actuator/health/readiness
   port: management
-  failureThreshold: 30
-  periodSeconds: 2
+  # periodSeconds: 1 statt 2 verkuerzt die Erkennungslatenz nach Scale-up-aus-0
+  # im Schnitt um ~0.5s; failureThreshold entsprechend verdoppelt, damit das
+  # max. Zeitfenster (failureThreshold * periodSeconds = 60s) gleich bleibt.
+  failureThreshold: 60
+  periodSeconds: 1
   timeoutSeconds: 5
 
 readinessProbe:
