@@ -1,0 +1,58 @@
+# Werte fuer den offiziellen prometheus-community/prometheus Helm-Chart.
+# Gegen Chart-Version 29.31.1 (per "helm show values prometheus-community/prometheus
+# --version 29.31.1") abgeglichen - bei Update auf eine neuere Major-Version
+# erneut pruefen, das Werte-Schema kann sich aendern.
+#
+# Zweck ist bewusst eng gefasst: dieser Prometheus soll NUR die PromQL-Query
+# beantworten, die das ScaledObject in chart-keda gegen istio_requests_total
+# stellt (siehe chart-keda/values.yaml: keda.triggers.prometheus). Es ist kein
+# vollstaendiger Observability-Stack - Alertmanager, Pushgateway,
+# kube-state-metrics und der Node-Exporter werden daher deaktiviert, um
+# Ressourcen und Angriffsflaeche klein zu halten. Wer diese Komponenten
+# zusaetzlich braucht, sollte eher kube-prometheus-stack statt diesem
+# Einzel-Chart in Betracht ziehen.
+alertmanager:
+  enabled: false
+kube-state-metrics:
+  enabled: false
+prometheus-node-exporter:
+  enabled: false
+prometheus-pushgateway:
+  enabled: false
+
+# Hinweis: der Standard-Scrape-Job "scrapeConfigs.kubernetes-pods" (Teil der
+# Chart-Defaults, siehe "helm show values") ist bereits aktiv und wertet
+# exakt die prometheus.io/scrape|port|path Pod-Annotations aus, die sowohl
+# istio-ingressgateway (von Istio selbst automatisch gesetzt: scrape=true,
+# port=15020, path=/stats/prometheus - per "kubectl get pod -n istio-ingress
+# ... -o yaml" verifiziert) als auch die App-Pods aus chart-hpa/chart-keda
+# (siehe deren podAnnotations) tragen. Keine zusaetzliche scrapeConfigs-
+# Aenderung noetig, um istio_requests_total zu scrapen.
+
+server:
+  # Kurze Retention: KEDA fragt nur die gleitende 1-Minuten-Rate ab (siehe
+  # keda.triggers.prometheus.query in chart-keda/values.yaml), eine lange
+  # Historie wird fuer diesen Zweck nicht gebraucht.
+  retention: "6h"
+
+  persistentVolume:
+    enabled: true
+    size: 2Gi
+
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+  # Chart-Default laesst containerSecurityContext leer - explizit haerten wie
+  # bei den restlichen Charts in diesem Repo. Falls der Server-Container damit
+  # nicht mehr startet (z.B. wegen Schreibzugriffen ausserhalb des
+  # PVC-Mounts), readOnlyRootFilesystem als erstes wieder entfernen.
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
