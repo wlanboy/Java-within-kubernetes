@@ -154,6 +154,15 @@ Bleibt der Fehler dauerhaft bestehen (auch nachdem ein Pod längst laufen sollte
 (`http_requests_per_second`) überhaupt Werte liefert (Event `FailedGetObjectMetric`
 deutet auf ein Problem mit dem Prometheus Adapter hin).
 
+**Nicht manuell `kubectl scale --replicas=0` zum Testen verwenden:** Ein von außen (nicht
+vom HPA selbst) auf 0 gesetztes Deployment bringt den HPA-internen Zustand durcheinander –
+er skaliert dann auch bei echtem Traffic nicht mehr automatisch hoch und bleibt bei
+`ScalingActive: False, Reason: ScalingDisabled` hängen, obwohl das Feature-Gate korrekt
+gesetzt ist. Überlässt man dem HPA den kompletten Zyklus selbst (herunterskalieren lassen,
+statt es zu erzwingen), funktioniert Scale-to-Zero zuverlässig: gemessen wurden ca. 15s von
+Traffic-Beginn bis der Pod `2/2 Running` ist. Zum Testen also echten Traffic stoppen/senden
+lassen (siehe [Lasttest](#lasttest-hpa-testen)) statt `kubectl scale` zu benutzen.
+
 ## Scale-up beschleunigen
 
 Zeit von "0 Replicas" bis "Request wird bedient" setzt sich aus mehreren Faktoren
