@@ -97,19 +97,10 @@ Wenn `istio.gateway.enabled=true` ist (Default), wird der Service über das best
 `istio-ingressgateway` per `Gateway`/`VirtualService` unter den Hosts `hello-world.local`
 und `hello-world.gmk.lan` erreichbar gemacht (siehe `istio.gateway.hosts`).
 
-IP und Port des Ingress-Gateways ermitteln (Namespace im Cluster: `istio-ingress`):
-
-```bash
-export INGRESS_HOST=$(kubectl -n istio-ingress get svc istio-ingressgateway \
-  -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-export INGRESS_PORT=$(kubectl -n istio-ingress get svc istio-ingressgateway \
-  -o jsonpath='{.spec.ports[?(@.name=="http2")].port}')
-```
-
 Request per curl mit gesetztem Host-Header (kein DNS-Eintrag nötig):
 
 ```bash
-curl -H "Host: hello-world.local" "http://${INGRESS_HOST}:${INGRESS_PORT}/hello"
+curl -H "Host: hello-world.local" "http://localhost:80/hello"
 ```
 
 Mit funktionierendem DNS (z. B. `hello-world.gmk.lan` zeigt per Wildcard auf die
