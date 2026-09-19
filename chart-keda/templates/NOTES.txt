@@ -1,0 +1,26 @@
+{{ include "hello-world-keda.fullname" . }} wurde in Namespace {{ .Release.Namespace }} deployed.
+
+Voraussetzung: der KEDA-Operator muss im Cluster laufen, siehe ../keda/keda-setup.md
+(pruefen: kubectl get pods -n keda).
+
+Rollout-Status pruefen:
+  kubectl rollout status -n {{ .Release.Namespace }} deployment/{{ include "hello-world-keda.fullname" . }}
+
+Service erreichen (Port-Forward):
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "hello-world-keda.fullname" . }} 8080:{{ .Values.service.port }}
+{{- if .Values.keda.enabled }}
+
+ScaledObject-Status pruefen:
+  kubectl get scaledobject -n {{ .Release.Namespace }} {{ include "hello-world-keda.fullname" . }} -w
+  kubectl get hpa -n {{ .Release.Namespace }} keda-hpa-{{ include "hello-world-keda.fullname" . }} -w
+
+Hinweis: Skaliert zwischen {{ .Values.keda.minReplicaCount }} und {{ .Values.keda.maxReplicaCount }} Replicas anhand:
+{{- if .Values.keda.triggers.cpu.enabled }}
+  - CPU-Auslastung (Ziel: {{ .Values.keda.triggers.cpu.value }}%), ueber metrics-server (metrics.k8s.io).
+{{- end }}
+{{- if .Values.keda.triggers.prometheus.enabled }}
+  - PromQL-Query gegen {{ .Values.keda.triggers.prometheus.serverAddress }} (Ziel: {{ .Values.keda.triggers.prometheus.threshold }}).
+    Anders als bei chart-hpa wird KEIN custom.metrics.k8s.io Adapter benoetigt,
+    KEDA fragt Prometheus direkt ab.
+{{- end }}
+{{- end }}

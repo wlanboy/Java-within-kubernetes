@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "hello-world-keda.fullname" . }}-config
+  labels:
+    {{- include "hello-world-keda.labels" . | nindent 4 }}
+data:
+  application.properties: |
+{{- .Values.config | nindent 4 }}

@@ -3,67 +3,77 @@ fullnameOverride: ""
 
 replicaCount: 1
 
-# HorizontalPodAutoscaler: skaliert die Anzahl der Pods anhand CPU-Auslastung
-# (metrics-server, sofort nutzbar) und/oder Requests/Sekunde pro Pod
-# (custom.metrics.k8s.io, benoetigt zusaetzlich einen Custom-Metrics-Adapter
-# wie z.B. Prometheus Adapter mit einer Regel, die
-# http_server_requests_seconds_count aus Actuator/Micrometer in
-# http_requests_per_second pro Pod umrechnet). Solange kein solcher Adapter
-# laeuft, bitte requestsMetric.enabled: false setzen, sonst bleibt der HPA
-# bei "unknown" haengen.
+# KEDA ScaledObject: ersetzt die native HorizontalPodAutoscaler-Ressource aus
+# chart-hpa. Vorteil gegenueber chart-hpa: KEDA fragt Prometheus direkt per
+# PromQL ab, es wird also KEIN custom.metrics.k8s.io Adapter (z.B. Prometheus
+# Adapter) mehr benoetigt. minReplicaCount: 0 ("scale to zero") funktioniert
+# daher ohne die in chart-hpa noetige Object-Metrik-Umgehung ueber das
+# istio-ingressgateway - die PromQL-Query liefert unabhaengig von laufenden
+# Pods ein Ergebnis (ggf. 0), das reicht KEDA zum Hochskalieren.
 #
-# Hinweis: minReplicas: 0 ("scale to zero") braucht zusaetzlich
-# auch eine Object- oder External-Metrik, die auch bei 0 Replicas existiert.
-# requestsMetric wird daher ueber das istio-ingressgateway gemessen,
-# damit sie auch bei 0 Replicas existiert und der HPA wieder hochskalieren kann.
-autoscaling:
+# Voraussetzung: der KEDA-Operator muss im Cluster laufen (siehe
+# ../keda/keda-setup.md) und fuer den Prometheus-Trigger zusaetzlich der
+# Prometheus-Server aus ../prometheus/prometheus-setup.md.
+keda:
   enabled: true
-  minReplicas: 0
-  maxReplicas: 5
-  cpu:
-    enabled: true
-    targetAverageUtilization: 70
-  requestsMetric:
-    enabled: true
-    name: http_requests_per_second
-    targetAverageValue: "50"
-  # behavior steuert, wie schnell/vorsichtig der HPA auf neue Metrikwerte reagiert:
-  #   stabilizationWindowSeconds: der HPA schaut auf alle Recommendations der
-  #     letzten N Sekunden und nimmt davon das fuer die Scale-Richtung "sicherste"
-  #     (bei scaleUp das Maximum, bei scaleDown das Minimum). 0 = keine Verzoegerung,
-  #     reagiert sofort auf den aktuellen Wert; ein hoeherer Wert glaettet
-  #     kurzfristige Ausschlaege (Flapping), verzoegert die Reaktion aber entsprechend.
-  #   podsPerPeriod / periodSeconds: begrenzt zusaetzlich, wie viele Pods pro
-  #     periodSeconds hoechstens dazu- (scaleUp) bzw. abgebaut (scaleDown) werden
-  #     duerfen. Bei mehreren noetigen Schritten (z.B. 5 -> 0 Replicas) braucht
-  #     der HPA dadurch mehrere Perioden hintereinander, nicht nur eine.
-  behavior:
-    scaleUp:
-      # sofort reagieren (kein Stabilization-Delay), aber pro 30s hoechstens
-      # 2 neue Pods, damit nicht bei einem kurzen Spitzenwert sofort auf
-      # maxReplicas hochgeschossen wird
-      stabilizationWindowSeconds: 0
-      podsPerPeriod: 2
-      periodSeconds: 30
-    scaleDown:
-      # 60s abwarten (nimmt den jeweils niedrigsten Wert aus diesem Fenster),
-      # damit ein kurzer Lastabfall nicht sofort zum Runterskalieren fuehrt;
-      # danach hoechstens 1 Pod pro 30s abbauen, um Requests waehrend des
-      # graceful shutdown (siehe preStopSleepSeconds/terminationGracePeriodSeconds)
-      # nicht auf zu wenige verbleibende Pods zu konzentrieren
-      stabilizationWindowSeconds: 60
-      podsPerPeriod: 1
-      periodSeconds: 30
+  # Wie oft KEDA die Trigger abfragt (Sekunden). Bestimmt u.a. wie schnell von
+  # 0 Replicas wieder hochskaliert wird, sobald wieder Traffic ankommt.
+  pollingInterval: 30
+  # Wie lange nach dem letzten "aktiven" Trigger-Wert gewartet wird, bevor auf
+  # minReplicaCount (hier 0) heruntergefahren wird.
+  cooldownPeriod: 300
+  minReplicaCount: 0
+  maxReplicaCount: 5
+  triggers:
+    cpu:
+      enabled: true
+      type: Utilization
+      value: "70"
+    prometheus:
+      enabled: true
+      # Adresse des Prometheus-Servers aus ../prometheus/ (Service
+      # "prometheus-server" im Namespace "prometheus", Port 80 - NICHT 9090,
+      # das ist nur der interne targetPort). Istio-ingressgateway laeuft im
+      # Namespace "istio-ingress", nicht "istio-system" (das ist nur istiod).
+      serverAddress: "http://prometheus-server.prometheus.svc.cluster.local"
+      metricName: http_requests_per_second
+      # Aggregiert Requests/Sekunde ueber alle Pods hinweg (Object-Metrik,
+      # analog zum requestsMetric in chart-hpa), gemessen am
+      # istio-ingressgateway statt an den App-Pods, damit die Query auch bei
+      # 0 Replicas ein Ergebnis liefert.
+      query: >-
+        sum(rate(istio_requests_total{destination_service=~"hello-world-keda\\..*"}[1m]))
+      threshold: "50"
+      # Ab welchem Metrikwert der Trigger ueberhaupt als "aktiv" gilt (siehe
+      # cooldownPeriod). "0" heisst: jeder Wert > 0 haelt den Trigger aktiv.
+      activationThreshold: "0"
+  # behavior steuert, wie schnell/vorsichtig die von KEDA erzeugte HPA-Ressource
+  # auf neue Trigger-Werte reagiert - Semantik identisch zum behavior-Block in
+  # chart-hpa/values.yaml (siehe dort fuer Details zu
+  # stabilizationWindowSeconds/podsPerPeriod/periodSeconds).
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 0
+          podsPerPeriod: 2
+          periodSeconds: 30
+        scaleDown:
+          stabilizationWindowSeconds: 60
+          podsPerPeriod: 1
+          periodSeconds: 30
 
 # Istio Gateway/VirtualService: routet Traffic vom bestehenden
-# istio-ingressgateway zu diesem Service. Erzeugt die
-# istio_requests_total-Metrik (Object-Metrik, siehe
-# autoscaling.requestsMetric oben), die auch bei 0 Replicas existiert und
-# damit die einzige Quelle ist, die den ersten Pod aus dem Stand von 0 wecken
-# kann - ohne dieses Routing bleibt requestsMetric dauerhaft auf "unknown".
+# istio-ingressgateway zu diesem Service. Erzeugt eigene Gateway/VirtualService-
+# Objekte (statt die von chart-hpa/templates/gateway.yaml wiederzuverwenden),
+# damit chart-keda unabhaengig davon installiert/deinstalliert werden kann.
+# Ohne dieses Routing entsteht nie istio_requests_total mit
+# destination_service=hello-world-keda..., und der Prometheus-Trigger kann
+# nie den ersten Pod aus dem Stand von 0 Replicas wecken (siehe
+# keda.triggers.prometheus oben).
 istio:
   enabled: true
-  host: "hello-world.local"
+  host: "hello-world-keda.local"
   # Pod-Label-Selector des istio-ingressgateway-Workloads (per "kubectl get
   # pod -n istio-ingress -l app=istio-ingressgateway --show-labels" verifiziert).
   gatewaySelector:
@@ -164,19 +174,18 @@ preStopSleepSeconds: 5
 # (Node-Drain, Cluster-Autoscaler-Downscale, kubectl evict) gleichzeitig
 # entfernt werden duerfen. Schuetzt NICHT vor Pod-Crashes/OOM-Kills, nur vor
 # absichtlichen/geplanten Aktionen.
-# HPA-Skalierung (auch scale-to-zero via autoscaling.minReplicas: 0) ist davon
+# Skalierung durch KEDA (auch scale-to-zero via minReplicaCount: 0) ist davon
 # NICHT betroffen, da der ReplicaSet-Controller die Pods dabei direkt loescht
 # und nicht ueber die Eviction-API geht, die die PDB durchsetzt.
 # Achtung trotzdem: minAvailable muss kleiner als die aktuelle Replica-Zahl
-# sein, sonst wird jede freiwillige Disruption blockiert. Sobald der HPA
-# (z.B. nach dem Hochskalieren aus 0) nur 1 Pod faehrt, verhindert
-# minAvailable: 1 damit jeden Node-Drain dieses einen Pods, bis erneut
-# hochskaliert wurde.
+# sein, sonst wird jede freiwillige Disruption blockiert. Sobald KEDA (z.B.
+# nach dem Hochskalieren aus 0) nur 1 Pod faehrt, verhindert minAvailable: 1
+# damit jeden Node-Drain dieses einen Pods, bis erneut hochskaliert wurde.
 podDisruptionBudget:
   enabled: true
   minAvailable: 1
 
-# application.properties Inhalt fuer die ConfigMap (siehe manifests/configmap.yaml)
+# application.properties Inhalt fuer die ConfigMap (siehe templates/configmap.yaml)
 config: |
   # --- Server ---
   server.shutdown=graceful

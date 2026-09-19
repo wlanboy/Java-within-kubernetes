@@ -1,0 +1,19 @@
+{{- if .Values.istio.enabled }}
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: {{ include "hello-world-keda.fullname" . }}
+  labels:
+    {{- include "hello-world-keda.labels" . | nindent 4 }}
+spec:
+  hosts:
+    - {{ .Values.istio.host | quote }}
+  gateways:
+    - {{ include "hello-world-keda.fullname" . }}-gateway
+  http:
+    - route:
+        - destination:
+            host: {{ include "hello-world-keda.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
+            port:
+              number: {{ .Values.service.port }}
+{{- end }}

@@ -1,0 +1,64 @@
+{{- if .Values.keda.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ include "hello-world-keda.fullname" . }}
+  labels:
+    {{- include "hello-world-keda.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "hello-world-keda.fullname" . }}
+  pollingInterval: {{ .Values.keda.pollingInterval }}
+  cooldownPeriod: {{ .Values.keda.cooldownPeriod }}
+  minReplicaCount: {{ .Values.keda.minReplicaCount }}
+  maxReplicaCount: {{ .Values.keda.maxReplicaCount }}
+  {{- with .Values.keda.advanced.horizontalPodAutoscalerConfig.behavior }}
+  # Steuert, wie schnell/vorsichtig die von KEDA erzeugte HPA-Ressource
+  # (keda-hpa-{{ include "hello-world-keda.fullname" $ }}) auf neue Trigger-Werte
+  # reagiert - inhaltlich identisch zum behavior-Block in chart-hpa/templates/hpa.yaml.
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: {{ .scaleUp.stabilizationWindowSeconds }}
+          policies:
+            - type: Pods
+              value: {{ .scaleUp.podsPerPeriod }}
+              periodSeconds: {{ .scaleUp.periodSeconds }}
+        scaleDown:
+          stabilizationWindowSeconds: {{ .scaleDown.stabilizationWindowSeconds }}
+          policies:
+            - type: Pods
+              value: {{ .scaleDown.podsPerPeriod }}
+              periodSeconds: {{ .scaleDown.periodSeconds }}
+  {{- end }}
+  triggers:
+    {{- if .Values.keda.triggers.cpu.enabled }}
+    # Resource-Trigger ueber metrics.k8s.io (metrics-server), aequivalent zum
+    # "type: Resource" Eintrag in chart-hpa/templates/hpa.yaml. Greift erst,
+    # wenn mindestens 1 Pod laeuft (Resource-Metriken existieren nicht bei
+    # 0 Replicas) - reiner Ergaenzungstrigger zum Prometheus-Trigger unten.
+    - type: cpu
+      metricType: {{ .Values.keda.triggers.cpu.type }}
+      metadata:
+        value: {{ .Values.keda.triggers.cpu.value | quote }}
+    {{- end }}
+    {{- if .Values.keda.triggers.prometheus.enabled }}
+    # Prometheus-Trigger: KEDA fragt Prometheus direkt per PromQL ab - anders
+    # als beim Object-Metric-Trigger in chart-hpa wird dafuer KEIN
+    # custom.metrics.k8s.io Adapter (z.B. Prometheus Adapter) benoetigt. Die
+    # Query muss auch bei 0 Replicas ein Ergebnis liefern (ggf. 0), damit KEDA
+    # ueberhaupt von 0 wieder hochskalieren kann - daher gegen
+    # istio_requests_total am Ingressgateway messen, nicht gegen eine
+    # App-Pod-Metrik.
+    - type: prometheus
+      metadata:
+        serverAddress: {{ .Values.keda.triggers.prometheus.serverAddress | quote }}
+        metricName: {{ .Values.keda.triggers.prometheus.metricName }}
+        query: {{ .Values.keda.triggers.prometheus.query | quote }}
+        threshold: {{ .Values.keda.triggers.prometheus.threshold | quote }}
+        activationThreshold: {{ .Values.keda.triggers.prometheus.activationThreshold | quote }}
+    {{- end }}
+{{- end }}
