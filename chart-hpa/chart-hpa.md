@@ -12,6 +12,13 @@ helm template hello-world chart-hpa
 
 ## Install
 
+Namespace mit Istio-Sidecar-Injection anlegen (falls Istio genutzt wird):
+
+```bash
+kubectl create namespace default
+kubectl label namespace default istio-injection=enabled
+```
+
 ```bash
 helm install hello-world chart-hpa \
   --namespace default \
