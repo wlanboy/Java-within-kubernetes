@@ -129,15 +129,57 @@ curl -H "Host: hello-world.local" "http://localhost:8080/hello"
 Das erzeugt `istio_requests_total` am Gateway und dient so – auch ohne laufende App-Pods –
 als Quelle für das HPA-Scale-to-Zero.
 
-**"no healthy upstream" bei 0 Replicas:** Der Chart enthält keinen Queue-Proxy/Activator
-(wie z. B. Knative), der Requests puffert, während der Pod hochfährt. Bei `minReplicas: 0`
-gibt es also kurz nach dem ersten Request (der den HPA erst zum Hochskalieren triggert)
-noch keinen Endpoint – Envoy antwortet mit `503 no healthy upstream`, bis der Pod bereit
-ist (Startup-/Readiness-Probe, siehe `startupProbe`/`readinessProbe`). Ein erneuter curl
-nach ein paar Sekunden sollte dann `200 OK` liefern. Bleibt der Fehler dauerhaft bestehen,
-mit `kubectl describe hpa -n default hello-world-hpa` prüfen, ob die Custom-Metrics-API
+**"no healthy upstream" bei 0 Replicas:**
+Der Chart enthält keinen Queue-Proxy/Activator (wie z. B. Knative), der Requests puffert,
+während der Pod hochfährt. Bei `minReplicas: 0` und 0 laufenden Pods hat der
+Kubernetes-Service keine Endpoints (`kubectl get endpoints -n default hello-world-hpa`
+zeigt keine `subsets`). Envoy kann dann beim allerersten Schritt (Host-Auswahl) gar keinen
+Host wählen und gibt **sofort synchron** `503 no healthy upstream` zurück – das ist kein
+Timeout, sondern ein lokaler Fehler *vor* jeder Netzwerk-Anfrage. Die Retry-Policy
+(`istio.gateway.retries`) greift hier **nicht**: sie hilft nur, wenn Hosts vorhanden, aber
+(temporär) ungesund sind (z. B. während eines Rolling-Updates), nicht wenn der Cluster
+komplett leer ist. Gemessen: curl gegen einen 0-Replica-Service liefert den 503 in ~15ms,
+nicht nach den konfigurierten ~15s Retry-Budget.
+
+Praktische Konsequenz: Aufrufer, die gegen einen potenziell schlafenden (scale-to-zero)
+Service laufen, müssen **selbst retryen**, z. B.:
+
+```bash
+curl --retry 5 --retry-all-errors --retry-delay 3 \
+  -H "Host: hello-world.gmk.lan" "http://192.168.178.81/hello"
+```
+
+Bleibt der Fehler dauerhaft bestehen (auch nachdem ein Pod längst laufen sollte), mit
+`kubectl describe hpa -n default hello-world-hpa` prüfen, ob die Custom-Metrics-API
 (`http_requests_per_second`) überhaupt Werte liefert (Event `FailedGetObjectMetric`
-deutet auf einen Problem mit dem Prometheus Adapter hin).
+deutet auf ein Problem mit dem Prometheus Adapter hin).
+
+## Scale-up beschleunigen
+
+Zeit von "0 Replicas" bis "Request wird bedient" setzt sich aus mehreren Faktoren
+zusammen. Folgende Chart-seitige Hebel sind bereits gesetzt bzw. stehen zur Verfügung:
+
+- **`istio.gateway.retries`** (aktiv, `attempts: 5`, `perTryTimeout: 3s`): hilft bei
+  kurzzeitig ungesunden, aber vorhandenen Hosts (z. B. während eines Rolling-Updates).
+  Bei echten 0 Replicas (leerer Service, keine Endpoints) greift das **nicht** – Envoy
+  scheitert dann synchron bei der Host-Auswahl, bevor die Retry-Logik ausgeführt wird
+  (siehe Hinweis oben). Für den Scale-to-Zero-Fall ist Client-seitiger Retry nötig.
+- **`image.pullPolicy: IfNotPresent`** (statt `Always`): kein Registry-Roundtrip mehr
+  bei jedem Scale-up, wenn das Image bereits auf dem Node liegt. Achtung bei Tag
+  `latest`: ein neu gepushtes Image wird dadurch nicht automatisch geholt (siehe
+  Kommentar in `values.yaml`).
+- **`startupProbe.periodSeconds: 1`** (statt 2): der Pod wird im Schnitt ~0.5s früher
+  als "ready" erkannt, sobald er es tatsächlich ist.
+- **`autoscaling.behavior.scaleUp`**: bereits ohne Stabilization-Delay
+  (`stabilizationWindowSeconds: 0`), reagiert also sofort auf einen Metrikwert über dem
+  Ziel.
+
+**Nicht über diesen Chart steuerbar, aber oft der größte Anteil der Latenz:** wie schnell
+der HPA überhaupt merkt, dass wieder Traffic da ist. Das hängt vom Prometheus
+`scrape_interval`, dem Relist-/Query-Intervall des Prometheus Adapters und der
+HPA-Sync-Period des `kube-controller-manager` (Cluster-Default 15s) ab – zusammen oft
+15–30s, bevor der HPA überhaupt reagiert. Das lässt sich nur clusterweit (nicht pro
+Chart/Release) verkürzen.
 
 ## Status & Debugging
 
