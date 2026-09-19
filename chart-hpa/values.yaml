@@ -51,12 +51,12 @@ autoscaling:
   #     der HPA dadurch mehrere Perioden hintereinander, nicht nur eine.
   behavior:
     scaleUp:
-      # sofort reagieren (kein Stabilization-Delay), aber pro 30s hoechstens
+      # sofort reagieren (kein Stabilization-Delay), aber pro 15s hoechstens
       # 2 neue Pods, damit nicht bei einem kurzen Spitzenwert sofort auf
       # maxReplicas hochgeschossen wird
       stabilizationWindowSeconds: 0
       podsPerPeriod: 2
-      periodSeconds: 30
+      periodSeconds: 15
     scaleDown:
       # 30s abwarten (nimmt den jeweils niedrigsten Wert aus diesem Fenster),
       # damit ein kurzer Lastabfall nicht sofort zum Runterskalieren fuehrt;
