@@ -28,7 +28,12 @@ autoscaling:
   minReplicas: 0
   maxReplicas: 5
   cpu:
-    enabled: true
+    # Standardmaessig deaktiviert, da eine Resource-Metrik echtes Scale-to-Zero
+    # verhindert: die CPU-Utilization ist bei einem laufenden Pod (JVM-Grundlast,
+    # GC, ...) praktisch nie exakt 0%, wodurch ceil(currentReplicas * util/target)
+    # immer mindestens 1 ergibt. Da der HPA ueber alle Metriken das Maximum bildet,
+    # bleibt dann dauerhaft 1 Replica stehen, selbst wenn requestsMetric auf 0 faellt.
+    enabled: false
     targetAverageUtilization: 70
   requestsMetric:
     enabled: true
@@ -53,12 +58,12 @@ autoscaling:
       podsPerPeriod: 2
       periodSeconds: 30
     scaleDown:
-      # 60s abwarten (nimmt den jeweils niedrigsten Wert aus diesem Fenster),
+      # 30s abwarten (nimmt den jeweils niedrigsten Wert aus diesem Fenster),
       # damit ein kurzer Lastabfall nicht sofort zum Runterskalieren fuehrt;
       # danach hoechstens 1 Pod pro 30s abbauen, um Requests waehrend des
       # graceful shutdown (siehe preStopSleepSeconds/terminationGracePeriodSeconds)
       # nicht auf zu wenige verbleibende Pods zu konzentrieren
-      stabilizationWindowSeconds: 60
+      stabilizationWindowSeconds: 30
       podsPerPeriod: 1
       periodSeconds: 30
 
