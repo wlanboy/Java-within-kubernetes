@@ -91,6 +91,40 @@ kubectl get hpa -n default hello-world-hpa -w
 kubectl top pods -n default -l app=hello-world-hpa
 ```
 
+## Zugriff über das Istio Gateway
+
+Wenn `istio.gateway.enabled=true` ist (Default), wird der Service über das bestehende
+`istio-ingressgateway` per `Gateway`/`VirtualService` unter den Hosts `hello-world.local`
+und `hello-world.gmk.lan` erreichbar gemacht (siehe `istio.gateway.hosts`).
+
+IP und Port des Ingress-Gateways ermitteln:
+
+```bash
+export INGRESS_HOST=$(kubectl -n istio-system get svc istio-ingressgateway \
+  -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+export INGRESS_PORT=$(kubectl -n istio-system get svc istio-ingressgateway \
+  -o jsonpath='{.spec.ports[?(@.name=="http2")].port}')
+```
+
+Request per curl mit gesetztem Host-Header (kein DNS-Eintrag nötig):
+
+```bash
+curl -H "Host: hello-world.local" "http://${INGRESS_HOST}:${INGRESS_PORT}/hello"
+```
+
+Alternativ per Port-Forward auf das Gateway, falls keine externe LoadBalancer-IP vorhanden ist:
+
+```bash
+kubectl -n istio-system port-forward svc/istio-ingressgateway 8080:80
+curl -H "Host: hello-world.local" "http://localhost:8080/hello"
+
+curl "http://hello-world.gmk.lan/hello"
+```
+
+
+Das erzeugt `istio_requests_total` am Gateway und dient so – auch ohne laufende App-Pods –
+als Quelle für das HPA-Scale-to-Zero.
+
 ## Status & Debugging
 
 ```bash

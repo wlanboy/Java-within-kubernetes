@@ -104,7 +104,9 @@ service:
 istio:
   gateway:
     enabled: true
-    host: "hello-world.local"
+    hosts:
+      - "hello-world.local"
+      - "hello-world.gmk.lan"
 
 ports:
   http: 8080
