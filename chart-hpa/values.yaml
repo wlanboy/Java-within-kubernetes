@@ -6,9 +6,11 @@ replicaCount: 1
 # HorizontalPodAutoscaler: skaliert die Anzahl der Pods anhand CPU-Auslastung
 # (metrics-server, sofort nutzbar) und/oder Requests/Sekunde pro Pod
 # (custom.metrics.k8s.io, benoetigt zusaetzlich einen Custom-Metrics-Adapter
-# wie z.B. Prometheus Adapter mit einer Regel, die
-# http_server_requests_seconds_count aus Actuator/Micrometer in
-# http_requests_per_second pro Pod umrechnet). Solange kein solcher Adapter
+# wie z.B. Prometheus Adapter mit einer Regel, die http_server_requests_seconds_count
+# aus Actuator/Micrometer in http_requests_per_second pro Pod umrechnet). Der
+# Adapter ist bewusst NICHT Teil dieses Charts (cluster-weiter Singleton-Dienst:
+# ClusterRole/-Binding + APIService koennen nur einmal pro Cluster existieren,
+# siehe raspberrypi/prometheus/prometheus.sh). Solange kein solcher Adapter
 # laeuft, bitte requestsMetric.enabled: false setzen, sonst bleibt der HPA
 # bei "unknown" haengen.
 #
