@@ -97,12 +97,12 @@ Wenn `istio.gateway.enabled=true` ist (Default), wird der Service über das best
 `istio-ingressgateway` per `Gateway`/`VirtualService` unter den Hosts `hello-world.local`
 und `hello-world.gmk.lan` erreichbar gemacht (siehe `istio.gateway.hosts`).
 
-IP und Port des Ingress-Gateways ermitteln:
+IP und Port des Ingress-Gateways ermitteln (Namespace im Cluster: `istio-ingress`):
 
 ```bash
-export INGRESS_HOST=$(kubectl -n istio-system get svc istio-ingressgateway \
+export INGRESS_HOST=$(kubectl -n istio-ingress get svc istio-ingressgateway \
   -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-export INGRESS_PORT=$(kubectl -n istio-system get svc istio-ingressgateway \
+export INGRESS_PORT=$(kubectl -n istio-ingress get svc istio-ingressgateway \
   -o jsonpath='{.spec.ports[?(@.name=="http2")].port}')
 ```
 
@@ -112,18 +112,32 @@ Request per curl mit gesetztem Host-Header (kein DNS-Eintrag nötig):
 curl -H "Host: hello-world.local" "http://${INGRESS_HOST}:${INGRESS_PORT}/hello"
 ```
 
-Alternativ per Port-Forward auf das Gateway, falls keine externe LoadBalancer-IP vorhanden ist:
+Mit funktionierendem DNS (z. B. `hello-world.gmk.lan` zeigt per Wildcard auf die
+Ingress-LoadBalancer-IP) reicht auch:
 
 ```bash
-kubectl -n istio-system port-forward svc/istio-ingressgateway 8080:80
-curl -H "Host: hello-world.local" "http://localhost:8080/hello"
-
 curl "http://hello-world.gmk.lan/hello"
 ```
 
+Alternativ per Port-Forward auf das Gateway, falls keine externe LoadBalancer-IP vorhanden ist:
+
+```bash
+kubectl -n istio-ingress port-forward svc/istio-ingressgateway 8080:80
+curl -H "Host: hello-world.local" "http://localhost:8080/hello"
+```
 
 Das erzeugt `istio_requests_total` am Gateway und dient so – auch ohne laufende App-Pods –
 als Quelle für das HPA-Scale-to-Zero.
+
+**"no healthy upstream" bei 0 Replicas:** Der Chart enthält keinen Queue-Proxy/Activator
+(wie z. B. Knative), der Requests puffert, während der Pod hochfährt. Bei `minReplicas: 0`
+gibt es also kurz nach dem ersten Request (der den HPA erst zum Hochskalieren triggert)
+noch keinen Endpoint – Envoy antwortet mit `503 no healthy upstream`, bis der Pod bereit
+ist (Startup-/Readiness-Probe, siehe `startupProbe`/`readinessProbe`). Ein erneuter curl
+nach ein paar Sekunden sollte dann `200 OK` liefern. Bleibt der Fehler dauerhaft bestehen,
+mit `kubectl describe hpa -n default hello-world-hpa` prüfen, ob die Custom-Metrics-API
+(`http_requests_per_second`) überhaupt Werte liefert (Event `FailedGetObjectMetric`
+deutet auf einen Problem mit dem Prometheus Adapter hin).
 
 ## Status & Debugging
 
