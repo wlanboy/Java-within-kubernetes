@@ -7,6 +7,9 @@ metadata:
     {{- include "hello-world-hpa.labels" . | nindent 4 }}
 spec:
   minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  {{- with .Values.podDisruptionBudget.unhealthyPodEvictionPolicy }}
+  unhealthyPodEvictionPolicy: {{ . }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "hello-world-hpa.selectorLabels" . | nindent 6 }}

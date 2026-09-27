@@ -84,9 +84,11 @@ spec:
             timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
             failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
           lifecycle:
+            # NEU: native Sleep-Action (GA seit Kubernetes 1.34) statt "sh -c sleep",
+            # braucht keine Shell/kein sleep-Binary im Image
             preStop:
-              exec:
-                command: ["sh", "-c", "sleep {{ .Values.preStopSleepSeconds }}"]
+              sleep:
+                seconds: {{ .Values.preStopSleepSeconds }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
@@ -100,4 +102,7 @@ spec:
           configMap:
             name: {{ include "hello-world.fullname" . }}-config
         - name: tmp
-          emptyDir: {}
+          # NEU: sizeLimit, damit ein volllaufendes /tmp nur diesen Pod evicted
+          # statt den Node-Speicher (ephemeral-storage) zu belasten
+          emptyDir:
+            sizeLimit: {{ .Values.tmpSizeLimit }}
