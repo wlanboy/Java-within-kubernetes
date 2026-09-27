@@ -76,6 +76,15 @@ podAnnotations:
   prometheus.io/scrape: "true"
   prometheus.io/port: "8081"
   prometheus.io/path: "/actuator/prometheus"
+  # NEU: Istio-Sidecar als nativen Sidecar (initContainer mit restartPolicy:
+  # Always, Kubernetes >= 1.29) injizieren. Kubernetes startet ihn garantiert
+  # VOR dem App-Container und beendet ihn erst NACH ihm. Ohne das kann die App
+  # beim Start Requests senden, bevor Envoy bereit ist, und beim Shutdown
+  # (preStop + graceful shutdown) ist Envoy evtl. schon weg.
+  sidecar.istio.io/nativeSidecar: "true"
+  # NEU: Fallback fuer Cluster/Istio-Versionen ohne native Sidecars: App-Container
+  # erst starten, wenn Envoy ready ist (bei nativem Sidecar ohnehin implizit)
+  proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
 
 terminationGracePeriodSeconds: 40
 automountServiceAccountToken: false
@@ -134,8 +143,17 @@ env:
   TZ: "Europe/Berlin"
   SPRING_CONFIG_ADDITIONAL_LOCATION: "optional:file:/config/"
 
+# NEU: -Djava.security.egd=file:/dev/./urandom entfernt (seit JDK 9 wirkungslos,
+#      SecureRandom blockiert unter Linux ohnehin nicht mehr, siehe readme.md)
+# NEU: -XX:+UseCompactObjectHeaders (JEP 519): 8 statt 12 Byte Objekt-Header,
+#      weniger Heap-Verbrauch. Muss zum AOT-Cache-Trainingslauf im Dockerfile
+#      passen (ebenso -XX:+UseSerialGC), sonst verwirft die JVM den Cache.
+# NEU: -XX:NativeMemoryTracking=summary: macht den gesamten JVM-Speicher
+#      (Heap + Metaspace + Code-Cache + Threads + GC + ...) per
+#      "jcmd 1 VM.native_memory summary" messbar, Grundlage fuer resources.memory
+#      (siehe readme.md "Speicher messen"). Kostet ca. 1-2 % Speicher und etwas
+#      CPU, nach der Messung kann es wieder raus.
 javaOpts: >-
-  -Djava.security.egd=file:/dev/./urandom
   -XX:+ExitOnOutOfMemoryError
   -XX:MaxRAMPercentage=70.0
   -XX:InitialRAMPercentage=70.0
@@ -143,6 +161,8 @@ javaOpts: >-
   -XX:MaxDirectMemorySize=32m
   -XX:-UsePerfData
   -XX:+UseSerialGC
+  -XX:+UseCompactObjectHeaders
+  -XX:NativeMemoryTracking=summary
   -XX:ActiveProcessorCount=1
   -XX:TieredStopAtLevel=1
   -Dspring.aot.enabled=true
@@ -185,6 +205,9 @@ livenessProbe:
 
 preStopSleepSeconds: 5
 
+# NEU: Obergrenze fuer das /tmp-emptyDir (Tomcat-Work-Dir, JVM-Attach-Socket fuer jcmd)
+tmpSizeLimit: 64Mi
+
 # PodDisruptionBudget: begrenzt, wie viele Pods bei freiwilligen Disruptions
 # (Node-Drain, Cluster-Autoscaler-Downscale, kubectl evict) gleichzeitig
 # entfernt werden duerfen. Schuetzt NICHT vor Pod-Crashes/OOM-Kills, nur vor
@@ -200,6 +223,10 @@ preStopSleepSeconds: 5
 podDisruptionBudget:
   enabled: true
   minAvailable: 1
+  # NEU: Pods, die nicht Ready sind (z.B. CrashLoopBackOff), duerfen immer
+  # evicted werden. Mit dem Default (IfHealthyBudget) blockiert ein kaputter Pod
+  # jeden Node-Drain, obwohl er ohnehin keinen Traffic bedient (GA seit K8s 1.31).
+  unhealthyPodEvictionPolicy: AlwaysAllow
 
 # application.properties Inhalt fuer die ConfigMap (siehe manifests/configmap.yaml)
 config: |
@@ -207,18 +234,18 @@ config: |
   server.shutdown=graceful
   server.http2.enabled=true
 
-  # --- Tomcat: klein gehalten, weil der Pod nur 1 CPU-Core zugewiesen bekommt
-  # und zusaetzlich ein Istio-Sidecar auf demselben Node/Pod mitlaeuft.
-  # server.tomcat.threads.max=200 (Default)
-  server.tomcat.threads.max=20
+  # --- Tomcat
+  # NEU: server.tomcat.threads.max=20 und server.tomcat.threads.min-spare=5 entfernt.
+  # Mit spring.threads.virtual.enabled=true (in src/main/resources/application.properties,
+  # muss wegen Spring AOT zur Build-Zeit gesetzt sein) laeuft jeder Request auf einem
+  # eigenen Virtual Thread, der Tomcat-Worker-Pool wird nicht mehr genutzt und beide
+  # Werte waeren wirkungslos. Die Nebenlaeufigkeit begrenzt jetzt max-connections.
   # server.tomcat.max-connections=8192 (Default)
   server.tomcat.max-connections=512
   # Anzahl der Requests, die in die Warteschlange duerfen, bevor Verbindungen abgelehnt werden
   server.tomcat.accept-count=100
   # Anzahl der Processor-Objekte, die Tomcat zur Wiederverwendung vorhaelt (Default: 200)
   server.tomcat.processor-cache=200
-  # Bei threads.max=20 reichen wenige Idle-Threads (Default: 10)
-  server.tomcat.threads.min-spare=5
 
   # --- Timeouts: kurz halten, damit offene Keep-Alive-Verbindungen den graceful shutdown
   # (preStop-sleep von nur 5s, siehe Deployment) nicht verzoegern
