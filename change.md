@@ -2,7 +2,6 @@
 
 ## 2026-09-27: Review der Helm-Charts
 
-Gilt für `chart/` und `chart-hpa/` gleichermaßen. `manifests/` ist noch nicht angepasst.
 Ausführliche Begründungen und Messwerte stehen in der [readme.md](readme.md) (Abschnitte mit 🆕).
 
 ### Hinzugefügt
@@ -10,7 +9,7 @@ Ausführliche Begründungen und Messwerte stehen in der [readme.md](readme.md) (
 | Änderung | Wo | Warum |
 |---|---|---|
 | JDK-AOT-Cache (JEP 483/514/515) | `service/Dockerfile` (Trainingslauf mit `-XX:AOTCacheOutput`), `service/entrypoint.sh` (`-XX:AOTCache=/app/app.aot -jar /app/application.jar`) | Startzeit etwa halbiert: gemessen 0,89–0,92 s statt 1,73–1,85 s. Wichtig für Scale-up und Scale-from-zero. |
-| `-XX:+UseCompactObjectHeaders` (JEP 519) | `javaOpts`, Dockerfile-Trainingslauf | Objekt-Header 8 statt 12 Byte, weniger Heap. Muss im Chart und im Dockerfile gleich gesetzt sein, sonst verwirft die JVM den AOT-Cache. |
+| `-XX:+UseCompactObjectHeaders` (JEP 519) | `javaOpts`, `manifests/deployment.yaml` (`JAVA_OPTS`), Dockerfile-Trainingslauf | Objekt-Header 8 statt 12 Byte, weniger Heap. Muss im Chart und im Dockerfile gleich gesetzt sein, sonst verwirft die JVM den AOT-Cache. |
 | `-XX:NativeMemoryTracking=summary` | `javaOpts` | Speicherbedarf messen statt schätzen, als Grundlage für `resources.memory`. Messanleitung per `kubectl debug` + `jcmd` in der readme. Kann nach der Messung wieder raus. |
 | `spring.threads.virtual.enabled=true` | `service/src/main/resources/application.properties` | Blockierendes I/O belegt keine Plattform-Threads mehr (Pinning seit JDK 24 behoben, JEP 491). Muss wegen Spring AOT zur Build-Zeit gesetzt sein, in der ConfigMap wäre es wirkungslos. |
 | native preStop-Sleep (`lifecycle.preStop.sleep.seconds`) | `templates/deployment.yaml` | Ersetzt `sh -c sleep`, der Kubelet wartet selbst (GA seit Kubernetes 1.34). |

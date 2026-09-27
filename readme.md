@@ -96,7 +96,7 @@ The AOT cache's UseCompactObjectHeaders setting (enabled) does not equal the cur
 
 Nach Änderungen an diesen Flags im Chart also immer auch das Dockerfile anpassen und nach dem Deploy im Log auf `[aot]`-Warnungen prüfen. Die Warnungen `Skipping ...: Unlinked class not supported` beim **Build** sind normal (einzelne Klassen, die beim Training nicht vollständig gelinkt wurden).
 
-**Hinweis:** `manifests/deployment.yaml` ist noch nicht angepasst. Dort fehlt `-XX:+UseCompactObjectHeaders`, das neue Image läuft damit ohne Cache.
+**Hinweis:** `-XX:+UseCompactObjectHeaders` ist auch in `manifests/deployment.yaml` gesetzt, der Cache wird dort also ebenfalls genutzt.
 
 ---
 
@@ -223,14 +223,14 @@ Die JDK-Version des Debug-Images muss zur JVM passen (25). `-XX:-UsePerfData` st
 
 ## 🆕 Änderungsprotokoll 2026-09-27: Review der Helm-Charts
 
-Gilt für `chart/` und `chart-hpa/` gleichermaßen. `manifests/` wurde noch nicht angepasst.
+Gilt für `chart/` und `chart-hpa/` gleichermaßen. In `manifests/` ist bisher nur `-XX:+UseCompactObjectHeaders` nachgezogen.
 
 ### Hinzugefügt
 
 | Änderung | Wo | Warum | Details |
 |---|---|---|---|
 | JDK-AOT-Cache | `service/Dockerfile`, `service/entrypoint.sh` | Startzeit etwa halbiert (gemessen 0,9 s statt 1,8 s), wichtig für Scale-up und Scale-from-zero | [AOT Cache](#-aot-cache-jdk-25) |
-| `-XX:+UseCompactObjectHeaders` | `javaOpts`, Dockerfile-Training | weniger Heap | [JVM-Flags](#jvm-flags-java_opts-in-manifestsdeploymentyaml) |
+| `-XX:+UseCompactObjectHeaders` | `javaOpts`, `manifests/deployment.yaml`, Dockerfile-Training | weniger Heap | [JVM-Flags](#jvm-flags-java_opts-in-manifestsdeploymentyaml) |
 | `-XX:NativeMemoryTracking=summary` | `javaOpts` | `resources.memory` auf Messwerte statt Schätzung stützen | [Speicher messen](#-speicher-messen-native-memory-tracking) |
 | Virtual Threads | `application.properties` (Build-Zeit) | Blockierendes I/O belegt keine Plattform-Threads | [Server-/Tomcat-Konfiguration](#server-tomcat-konfiguration-manifestsconfigmapyaml) |
 | native preStop-Sleep | `deployment.yaml` | keine Shell für den Hook nötig | [Graceful Shutdown & Istio](#graceful-shutdown--istio) |

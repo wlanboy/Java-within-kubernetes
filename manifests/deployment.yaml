@@ -102,6 +102,7 @@ spec:
             #   -XX:MaxDirectMemorySize=32m               -> deckelt NIO-Direct-Buffers (von Tomcat genutzt), verhindert unbemerktes Off-Heap-Wachstum
             #   -XX:-UsePerfData                          -> kein Schreiben von /tmp/hsperfdata_*; passt zu readOnlyRootFilesystem und spart I/O
             #   -XX:+UseSerialGC                          -> Single-Threaded GC passend zu 1 CPU-Core, kein Overhead durch Parallel-/G1-GC-Threads
+            #   -XX:+UseCompactObjectHeaders              -> NEU (2026-09-27): 8 statt 12 Byte Objekt-Header (JEP 519), weniger Heap; muss wie UseSerialGC zum AOT-Cache-Trainingslauf im Dockerfile passen, sonst wird der Cache verworfen
             #   -XX:ActiveProcessorCount=1                -> JVM sieht nur 1 Core; muss zum CPU-Limit unten passen, sonst ueberschaetzte Thread-Pools/GC-Threads
             #   -XX:TieredStopAtLevel=1                   -> nur C1-Compiler (kein C2); spart CPU/Speicher fuer JIT, passend fuer kleine/kurzlebige Workloads
             #   -Dspring.aot.enabled=true                 -> aktiviert zur Laufzeit die beim Build per spring-boot:process-aot generierten AOT-Metadaten (weniger Reflection/Proxy-Arbeit beim Start -> schnellerer, ressourcenschonenderer Boot)
@@ -115,6 +116,7 @@ spec:
                 -XX:MaxDirectMemorySize=32m
                 -XX:-UsePerfData
                 -XX:+UseSerialGC
+                -XX:+UseCompactObjectHeaders
                 -XX:ActiveProcessorCount=1
                 -XX:TieredStopAtLevel=1
                 -Dspring.aot.enabled=true
