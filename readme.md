@@ -11,9 +11,14 @@ Voraussetzung für den Docker-Build ist ein Maven-Projekt (`pom.xml` + `src/`) n
 ## Deploy
 
 ```bash
-docker build -t wlanboy/helloworld:latest service/
+docker build --build-context git=.git -t wlanboy/helloworld:latest service/
 kubectl apply -f manifests/
 ```
+
+`--build-context git=.git` reicht das `.git`-Verzeichnis als Bind-Mount in den Maven-Build, damit
+das `git-commit-id-maven-plugin` eine `git.properties` erzeugt (Commit, Branch, Tags unter
+`/actuator/info`). Der Build-Kontext `service/` enthält selbst kein `.git`. Ohne den Parameter
+läuft der Build trotzdem durch, nur ohne Git-Infos.
 
 **Hinweis zum Image-Tag:** [deployment.yaml](manifests/deployment.yaml) nutzt bewusst `:latest` mit `imagePullPolicy: IfNotPresent` für dieses Beispiel-Repo (schnelles lokales Bauen/Testen ohne Versions-Bumps). Für den produktiven Einsatz sollte stattdessen ein gepinnter Tag (z. B. `1.0.0`) oder ein Image-Digest verwendet werden, damit Rollouts reproduzierbar bleiben und Nodes nicht dauerhaft an ein veraltetes gecachtes `latest`-Image gebunden sind.
 
