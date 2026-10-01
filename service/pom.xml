@@ -63,6 +63,21 @@
 				<artifactId>spring-boot-maven-plugin</artifactId>
 			</plugin>
 			<plugin>
+				<groupId>io.github.git-commit-id</groupId>
+				<artifactId>git-commit-id-maven-plugin</artifactId>
+				<configuration>
+					<!-- Docker-Build (Kontext service/) hat kein .git: Plugin ueberspringen statt Build abbrechen -->
+					<failOnNoGitDirectory>false</failOnNoGitDirectory>
+					<failOnUnableToExtractRepoInfo>false</failOnUnableToExtractRepoInfo>
+					<!-- kein Remote-Zugriff fuer ahead/behind -->
+					<offline>true</offline>
+					<!-- nur einmal pro Maven-Aufruf, auch bei "compile spring-boot:process-aot package" -->
+					<runOnlyOnce>true</runOnlyOnce>
+					<!-- Parent setzt verbose=true -->
+					<verbose>false</verbose>
+				</configuration>
+			</plugin>
+			<plugin>
 				<groupId>org.apache.maven.plugins</groupId>
 				<artifactId>maven-compiler-plugin</artifactId>
 				<executions>
@@ -85,5 +100,30 @@
 			</plugin>
 		</plugins>
 	</build>
+
+	<profiles>
+		<!-- Docker-Build (-Pdocker): .git wird per Build-Kontext gemountet, im Container liegen
+		     aber nur die Dateien aus service/, und die nicht unter service/. Fuer Git sind damit
+		     fast alle Dateien geloescht bzw. neu, git.dirty waere immer true und entfaellt deshalb. -->
+		<profile>
+			<id>docker</id>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>io.github.git-commit-id</groupId>
+						<artifactId>git-commit-id-maven-plugin</artifactId>
+						<configuration>
+							<excludeProperties>
+								<excludeProperty>git.dirty</excludeProperty>
+								<!-- haengt aus demselben Grund immer "-dirty" an; ein leeres
+								     <gitDescribe><dirty/> setzt Maven als null, dann greift der Default -->
+								<excludeProperty>git.commit.id.describe.*</excludeProperty>
+							</excludeProperties>
+						</configuration>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
+	</profiles>
 
 </project>
