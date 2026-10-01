@@ -3,6 +3,14 @@
 # --- Build & AOT-Verarbeitung ---
 # Voraussetzung: pom.xml enthaelt <start-class>...Application</start-class>
 # und <java.version>25</java.version> (siehe readme.md)
+
+# --- Optionaler Build-Kontext fuer git-commit-id-maven-plugin ---
+# Leere Default-Stage. Mit "docker build --build-context git=.git service/" ersetzt
+# BuildKit sie durch das .git-Verzeichnis des Repos (Kontext service/ enthaelt kein .git).
+# Ohne den Parameter bleibt sie leer, der Build laeuft trotzdem durch,
+# nur ohne git.properties (/actuator/info liefert dann {}).
+FROM scratch AS git
+
 FROM eclipse-temurin:25-jdk-alpine AS builder
 WORKDIR /workspace
 COPY .mvn ./.mvn
@@ -34,7 +42,27 @@ COPY src ./src
 #   maven.compiler.release=${java.version} (25)                     -> --release 25
 #   project.build.sourceEncoding=UTF-8                              -> -encoding UTF-8
 #   debug=true (Plugin-Default, kein debuglevel)                    -> -g
-RUN --mount=type=cache,target=/root/.m2 ./mvnw -q -DskipTests compile spring-boot:process-aot package
+#
+# CPU-Limit fuer den Build: BuildKit kennt kein --cpus pro RUN-Step, daher
+# begrenzt -XX:ActiveProcessorCount die CPUs, die die JVM sieht (GC-Threads,
+# JIT-Compiler-Threads, ForkJoin-Pool). JAVA_TOOL_OPTIONS statt MAVEN_OPTS, weil
+# spring-boot:process-aot eine eigene JVM forkt, die MAVEN_OPTS nicht sieht.
+# javac laeuft im Maven-Prozess und ist damit mit abgedeckt.
+# Ueberschreiben: docker build --build-arg BUILD_CPUS=4
+#
+# -Dmaven.test.skip=true statt -DskipTests: -DskipTests kompiliert die Tests trotzdem
+# (testCompile), und zwar jedes Mal komplett neu, weil process-aot in target/classes schreibt.
+# .git kommt als Bind-Mount aus der Stage "git" (siehe oben) und landet in keinem Layer.
+# rw: JGit darf z.B. den Index-Cache aktualisieren, die Aenderungen werden verworfen.
+# -Pdocker laesst git.dirty weg (siehe Profil in der pom.xml).
+# Ohne --build-context ist /workspace/.git ein leeres Verzeichnis. Das Plugin haelt es fuer
+# ein Repo und bricht ab (failOnNoGitDirectory greift nicht), daher dann ganz ueberspringen.
+ARG BUILD_CPUS=2
+RUN --mount=type=cache,target=/root/.m2 \
+    --mount=type=bind,from=git,target=/workspace/.git,rw \
+    GIT_SKIP=$([ -f .git/HEAD ] || echo -Dmaven.gitcommitid.skip=true) && \
+    JAVA_TOOL_OPTIONS="-XX:ActiveProcessorCount=${BUILD_CPUS}" \
+    ./mvnw -q -Pdocker ${GIT_SKIP} -Dmaven.test.skip=true compile spring-boot:process-aot package
 
 # --- Extraktion (kleineres, cachefreundlicheres Runtime-Image) ---
 # NEU: ohne --launcher. Der JDK-AOT-Cache (siehe Runtime-Stage) funktioniert nur
