@@ -8,6 +8,32 @@ WORKDIR /workspace
 COPY .mvn ./.mvn
 COPY mvnw pom.xml ./
 COPY src ./src
+# JavaC Compiler Infos
+# javac optimiert praktisch nicht, das übernimmt zur Laufzeit der JIT (C1/C2).
+# Startzeit/Speicher gewinnt man hier über Spring AOT und den JDK-AOT-Cache.
+#
+# Option                      Wirkung
+# -O                          Wird seit JDK 1.3 ignoriert, das Flag existiert nur noch aus Kompatibilitätsgründen
+# -g:none                     Entfernt Debug-Infos. Die Klassendateien werden etwas kleiner, schneller wird die Ausführung nicht,
+#                             weil der JIT diese Infos ignoriert. Stacktraces hätten dann keine Zeilennummern mehr.
+# -g:lines,source             Kompromiss: nur Zeilennummern und Dateiname, ohne Namen lokaler Variablen. Gewinn kaum messbar.
+#                             Maven-Default ist -g (debug=true), also alle Debug-Infos.
+# -parameters                 Wird für Spring gebraucht (Parameternamen bei DI und @PathVariable). spring-boot-starter-parent setzt es
+# -encoding UTF-8             Quellcode-Encoding. spring-boot-starter-parent setzt project.build.sourceEncoding=UTF-8
+# -proc:full                  Seit JDK 23 ist -proc:none der Default, Annotation Processing läuft nur noch, wenn es explizit
+#                             aktiviert wird. Hier nicht nötig: <annotationProcessorPaths> in der pom.xml
+#                             (spring-boot-configuration-processor) erzeugt --processor-path und aktiviert es damit
+# -Xlint:all                  Zusätzliche Warnungen (deprecation, unchecked, ...). Nur Codequalität, keine Performance
+# -Werror                     Macht Warnungen zu Fehlern. Sinnvoll in der CI, kein Laufzeiteffekt
+# -implicit:none              Keine Klassendateien für implizit mitgeladene Quellen. Bei Maven ohne Wirkung, alle Quellen sind explizit
+# useIncrementalCompilation   Maven-Option, Default true.
+# -T 1C (Maven)               Paralleler Build. Ohne Wirkung, hier gibt es nur ein Modul
+#
+# Bereits durch spring-boot-starter-parent 4.1.1 gesetzt (geprüft mit mvn help:effective-pom):
+#   maven-compiler-plugin 3.15.0 mit <parameters>true</parameters>  -> -parameters
+#   maven.compiler.release=${java.version} (25)                     -> --release 25
+#   project.build.sourceEncoding=UTF-8                              -> -encoding UTF-8
+#   debug=true (Plugin-Default, kein debuglevel)                    -> -g
 RUN --mount=type=cache,target=/root/.m2 ./mvnw -q -DskipTests compile spring-boot:process-aot package
 
 # --- Extraktion (kleineres, cachefreundlicheres Runtime-Image) ---
