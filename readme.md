@@ -20,6 +20,8 @@ das `git-commit-id-maven-plugin` eine `git.properties` erzeugt (Commit, Branch, 
 `/actuator/info`). Der Build-Kontext `service/` enthält selbst kein `.git`. Ohne den Parameter
 läuft der Build trotzdem durch, nur ohne Git-Infos.
 
+Im Cluster baut die Tekton-Pipeline in [tekton/](tekton/readme.md) das Image mit BuildKit und pusht es.
+
 **Hinweis zum Image-Tag:** [deployment.yaml](manifests/deployment.yaml) nutzt bewusst `:latest` mit `imagePullPolicy: IfNotPresent` für dieses Beispiel-Repo (schnelles lokales Bauen/Testen ohne Versions-Bumps). Für den produktiven Einsatz sollte stattdessen ein gepinnter Tag (z. B. `1.0.0`) oder ein Image-Digest verwendet werden, damit Rollouts reproduzierbar bleiben und Nodes nicht dauerhaft an ein veraltetes gecachtes `latest`-Image gebunden sind.
 
 ---
