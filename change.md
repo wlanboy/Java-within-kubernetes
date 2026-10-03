@@ -1,8 +1,14 @@
 # Änderungen
 
-## 2026-09-27: Review der Helm-Charts
+- **Startzeit:** Der JDK-AOT-Cache halbiert den Start von rund 1,8 s auf rund 0,9 s. Dafür startet die App jetzt per `-jar` statt über den `JarLauncher`.
+- **Speicher:** Compact Object Headers verkleinern den Heap. NMT ist vorübergehend aktiv, um `resources.memory` auf Messwerte statt Schätzungen zu stützen.
+- **Nebenläufigkeit:** Virtual Threads ersetzen den Tomcat-Worker-Pool. Die Thread-Pool-Einstellungen sind deshalb entfallen.
+- **Start und Shutdown:** Native Istio-Sidecars und der native preStop-Sleep sorgen dafür, dass beim Start und beim Graceful Shutdown keine Requests verloren gehen.
+- **Betrieb:** Pods im CrashLoop blockieren keinen Node-Drain mehr, `/tmp` ist auf 64Mi begrenzt, und die Standard-Labels `app.kubernetes.io/*` sind gesetzt.
+- **Aufgeräumt:** Wirkungslose Optionen (`java.security.egd`, Tomcat-Thread-Limits) sind entfernt.
+- **Offen:** Memory-Requests/-Limits und `TieredStopAtLevel=1` bleiben, bis Messungen unter Last vorliegen.
 
-Ausführliche Begründungen und Messwerte stehen in der [readme.md](readme.md) (Abschnitte mit 🆕).
+Wichtig beim Ändern: Die JVM-Flags müssen im Chart und im Dockerfile-Trainingslauf übereinstimmen, sonst verwirft die JVM den AOT-Cache.
 
 ### Hinzugefügt
 
