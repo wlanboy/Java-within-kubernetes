@@ -1,0 +1,14 @@
+# Persistenter BuildKit-Cache (Image-Layer + Maven-Repository aus RUN --mount=type=cache).
+# BuildKit sperrt sein State-Verzeichnis: Zwei Runs mit derselben PVC laufen nicht parallel.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: helloworld-buildkit-cache
+  labels:
+    app.kubernetes.io/part-of: helloworld
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi

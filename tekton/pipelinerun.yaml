@@ -1,0 +1,43 @@
+# Start: kubectl create -f tekton/pipelinerun.yaml
+# (create statt apply wegen generateName)
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: helloworld-build-
+  labels:
+    app.kubernetes.io/part-of: helloworld
+spec:
+  pipelineRef:
+    name: helloworld-build
+  params:
+    - name: git-revision
+      value: main
+    - name: image
+      value: docker.io/wlanboy/helloworld
+    - name: tag
+      value: latest
+  taskRunTemplate:
+    podTemplate:
+      securityContext:
+        # git-clone laeuft als 65532 und muss in die frische PVC schreiben koennen
+        fsGroup: 65532
+  workspaces:
+    - name: source
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
+    - name: dockerconfig
+      secret:
+        secretName: registry-credentials
+        items:
+          - key: .dockerconfigjson
+            path: config.json
+    # Persistenter Cache aus pvc-buildkit-cache.yaml. Ohne Cache zwischen Runs stattdessen:
+    #   emptyDir: {}
+    - name: buildkit-cache
+      persistentVolumeClaim:
+        claimName: helloworld-buildkit-cache

@@ -1,0 +1,79 @@
+# Checkout -> Image bauen (Maven + Spring AOT + JDK-AOT-Cache im Dockerfile) -> Push
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: helloworld-build
+  labels:
+    app.kubernetes.io/part-of: helloworld
+spec:
+  description: Baut das Image des Spring-Boot-Service aus service/ und pusht es.
+  params:
+    - name: git-url
+      default: https://github.com/wlanboy/Java-within-kubernetes.git
+    - name: git-revision
+      description: Branch, Tag oder Commit
+      default: main
+    - name: image
+      default: docker.io/wlanboy/helloworld
+    - name: tag
+      default: latest
+    - name: context
+      default: service
+    - name: build-cpus
+      default: "2"
+  workspaces:
+    - name: source
+    - name: dockerconfig
+      optional: true
+    - name: buildkit-cache
+      optional: true
+  results:
+    - name: commit
+      value: $(tasks.fetch-source.results.commit)
+    - name: image-url
+      value: $(tasks.build-push.results.IMAGE_URL)
+    - name: image-digest
+      value: $(tasks.build-push.results.IMAGE_DIGEST)
+  tasks:
+    - name: fetch-source
+      taskRef:
+        # git-clone aus dem Tekton-Katalog, per Git-Resolver geladen (keine lokale Installation noetig)
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/tektoncd/catalog.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: task/git-clone/0.10/git-clone.yaml
+      params:
+        - name: url
+          value: $(params.git-url)
+        - name: revision
+          value: $(params.git-revision)
+      workspaces:
+        - name: output
+          workspace: source
+    - name: build-push
+      runAfter:
+        - fetch-source
+      taskRef:
+        name: buildkit-build-push
+      params:
+        - name: image
+          value: $(params.image)
+        - name: tag
+          value: $(params.tag)
+        - name: commit
+          value: $(tasks.fetch-source.results.commit)
+        - name: context
+          value: $(params.context)
+        - name: build-cpus
+          value: $(params.build-cpus)
+      workspaces:
+        - name: source
+          workspace: source
+        - name: dockerconfig
+          workspace: dockerconfig
+        - name: buildkit-cache
+          workspace: buildkit-cache
