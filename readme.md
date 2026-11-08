@@ -14,7 +14,7 @@ geändert hat, steht in [change.md](change.md).
 - [Deploy](#deploy)
 - [Docker-Image](#docker-image)
 - [Minimaler Tomcat](#minimaler-tomcat)
-- [Build-Zeit-Properties](#build-zeit-properties-application-properties)
+- [Build-Zeit-Properties](#build-zeit-properties-applicationproperties)
 - [Server-/Tomcat-Konfiguration](#server-tomcat-konfiguration-configmap)
 - [JVM-Flags](#jvm-flags-java_tool_options)
 - [Garbage-Collector-Guide](#garbage-collector-guide)
@@ -120,7 +120,7 @@ Rebuilds und Messungen ohne `--no-cache` bauen.
 
 Der Haken: `process-aot` wertet die Bedingungen schon beim Build aus. Alles, was Beans an- oder
 abschaltet, muss deshalb in der eingebauten `application.properties` stehen. Siehe
-[Build-Zeit-Properties](#build-zeit-properties-application-properties).
+[Build-Zeit-Properties](#build-zeit-properties-applicationproperties).
 
 ### Thin-JAR und Layer
 
