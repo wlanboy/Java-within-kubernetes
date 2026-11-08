@@ -140,7 +140,7 @@ for POD in ${PODS}; do
     MEM_MAX=0
   fi
 
-  # RSS des Java-Prozesses (PID 1, da entrypoint.sh "exec java ..." nutzt)
+  # RSS des Java-Prozesses (PID 1, ENTRYPOINT startet java direkt in Exec-Form)
   RSS_KB=$(kubectl exec -n "${NAMESPACE}" "${POD}" -c hello-world -- \
     sh -c "awk '/VmRSS/ {print \$2}' /proc/1/status 2>/dev/null" 2>/dev/null || echo 0)
 
@@ -178,9 +178,9 @@ for POD in ${PODS}; do
         }' \
       || echo "nicht ermittelbar (java im Container nicht ausfuehrbar?)"
     echo "Hinweis: das sind die vom laufenden Prozess neu ausgewerteten *Ergonomics*-Werte,"
-    echo "keine Live-Belegung -- das JRE-Alpine-Image enthaelt kein jcmd/NMT fuer echte"
-    echo "Metaspace-/Direct-Memory-Verbrauchsmessung. Fuer echten Verbrauch: cgroup"
-    echo "memory.current oben beobachten, waehrend Last auf den Pod gegeben wird."
+    echo "keine Live-Belegung. Das UBI-Runtime-Image enthaelt kein jcmd. Fuer echten Verbrauch:"
+    echo "cgroup memory.current/memory.peak oben beobachten, waehrend Last auf den Pod gegeben wird,"
+    echo "oder jcmd per Ephemeral Container (siehe readme.md, Speicher messen)."
   fi
 
   # --- AOT & Startzeit aus den Container-Logs ---

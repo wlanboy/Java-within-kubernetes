@@ -312,14 +312,20 @@ def check_jvm_memory(pod, mem_limit_bytes):
     else:
         kv("UsePerfData", dim("Default (true)"))
 
-    for flag, label in (("MaxRAMPercentage", "MaxHeapSize"), ("InitialRAMPercentage", "InitialHeapSize")):
-        pct_raw = flag_value(flag)
-        if pct_raw and mem_limit_bytes:
+    # Fester Heap (-Xms/-Xmx) hat Vorrang vor Max-/InitialRAMPercentage
+    for xflag, pct_flag, label in (("Xmx", "MaxRAMPercentage", "MaxHeapSize"),
+                                   ("Xms", "InitialRAMPercentage", "InitialHeapSize")):
+        m = re.search(rf"-{xflag}(\S+)", raw_opts)
+        fixed_mi = parse_size_to_mi(m.group(1)) if m else None
+        pct_raw = flag_value(pct_flag)
+        if fixed_mi is not None:
+            kv(label, f"{fixed_mi:.1f}Mi  {dim(f'(-{xflag})')}")
+        elif pct_raw and mem_limit_bytes:
             heap_mi = mem_limit_bytes / 1024 / 1024 * float(pct_raw) / 100
             limit_mi = mem_limit_bytes / 1024 / 1024
             kv(f"{label} (berechnet)", f"~{heap_mi:.1f}Mi  {dim(f'({pct_raw}% von {limit_mi:.0f}Mi Memory-Limit)')}")
         else:
-            info_line(f"{label} nicht berechenbar ({flag} oder Memory-Limit fehlt)")
+            info_line(f"{label} nicht berechenbar (-{xflag}, {pct_flag} oder Memory-Limit fehlt)")
 
 
 def check_aot_and_startup(pod):
