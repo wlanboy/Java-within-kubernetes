@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- [update] Eigene Layer-Definition
+     Reihenfolge = Reihenfolge im Dockerfile (seltenste Aenderung zuerst).
+     Bei neuen Layern Dockerfile (Training-Schleife + Runtime-COPY) mit anpassen. -->
+<layers xmlns="http://www.springframework.org/schema/boot/layers"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="http://www.springframework.org/schema/boot/layers
+                            https://www.springframework.org/schema/boot/layers/layers-3.4.xsd">
+    <application>
+        <into layer="spring-boot-loader">
+            <include>org/springframework/boot/loader/**</include>
+        </into>
+        <into layer="application-resources">
+            <include>META-INF/resources/**</include>
+            <include>static/**</include>
+            <include>templates/**</include>
+            <include>application*.properties</include>
+            <include>application*.yml</include>
+            <include>application*.yaml</include>
+        </into>
+        <into layer="application"/>
+    </application>
+    <dependencies>
+        <into layer="application">
+            <includeModuleDependencies/>
+        </into>
+        <into layer="snapshot-dependencies">
+            <include>*:*:*SNAPSHOT</include>
+        </into>
+        <into layer="observability-dependencies">
+            <include>io.micrometer:*</include>
+            <include>io.prometheus:*</include>
+            <include>org.hdrhistogram:*</include>
+            <include>org.latencyutils:*</include>
+        </into>
+        <into layer="dependencies"/>
+    </dependencies>
+    <layerOrder>
+        <layer>dependencies</layer>
+        <layer>observability-dependencies</layer>
+        <layer>spring-boot-loader</layer>
+        <layer>snapshot-dependencies</layer>
+        <layer>application-resources</layer>
+        <layer>application</layer>
+    </layerOrder>
+</layers>

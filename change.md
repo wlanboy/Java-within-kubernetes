@@ -14,8 +14,8 @@ Wichtig beim Ändern: Die JVM-Flags müssen im Chart und im Dockerfile-Trainings
 
 | Änderung | Wo | Warum |
 |---|---|---|
-| JDK-AOT-Cache (JEP 483/514/515) | `service/Dockerfile` (Trainingslauf mit `-XX:AOTCacheOutput`), `service/entrypoint.sh` (`-XX:AOTCache=/app/app.aot -jar /app/application.jar`) | Startzeit etwa halbiert: gemessen 0,89–0,92 s statt 1,73–1,85 s. Wichtig für Scale-up und Scale-from-zero. |
-| `-XX:+UseCompactObjectHeaders` (JEP 519) | `javaOpts`, `manifests/deployment.yaml` (`JAVA_OPTS`), Dockerfile-Trainingslauf | Objekt-Header 8 statt 12 Byte, weniger Heap. Muss im Chart und im Dockerfile gleich gesetzt sein, sonst verwirft die JVM den AOT-Cache. |
+| JDK-AOT-Cache (JEP 483/514/515) | `service/Dockerfile` (Trainingslauf mit `-XX:AOTCacheOutput`), `service/Dockerfile` ENTRYPOINT (`-XX:AOTCache=/app/app.aot -jar /app/app.jar`) | Startzeit etwa halbiert: gemessen 0,89–0,92 s statt 1,73–1,85 s. Wichtig für Scale-up und Scale-from-zero. |
+| `-XX:+UseCompactObjectHeaders` (JEP 519) | `javaOpts`, `manifests/deployment.yaml` (`JAVA_TOOL_OPTIONS`), Dockerfile-Trainingslauf | Objekt-Header 8 statt 12 Byte, weniger Heap. Muss im Chart und im Dockerfile gleich gesetzt sein, sonst verwirft die JVM den AOT-Cache. |
 | `-XX:NativeMemoryTracking=summary` | `javaOpts` | Speicherbedarf messen statt schätzen, als Grundlage für `resources.memory`. Messanleitung per `kubectl debug` + `jcmd` in der readme. Kann nach der Messung wieder raus. |
 | `spring.threads.virtual.enabled=true` | `service/src/main/resources/application.properties` | Blockierendes I/O belegt keine Plattform-Threads mehr (Pinning seit JDK 24 behoben, JEP 491). Muss wegen Spring AOT zur Build-Zeit gesetzt sein, in der ConfigMap wäre es wirkungslos. |
 | native preStop-Sleep (`lifecycle.preStop.sleep.seconds`) | `templates/deployment.yaml` | Ersetzt `sh -c sleep`, der Kubelet wartet selbst (GA seit Kubernetes 1.34). |
@@ -40,3 +40,13 @@ Wichtig beim Ändern: Die JVM-Flags müssen im Chart und im Dockerfile-Trainings
 | `requests.memory` = `limits.memory`, `MaxRAMPercentage` senken | Erst mit NMT unter realistischer Last messen. Erste Messung: ~200 MiB real bei 440 MB committed, Worst Case unter dem Limit von 512Mi. |
 | `-XX:TieredStopAtLevel=1` entfernen | Trade-off Startzeit/CPU gegen Spitzendurchsatz. Beibehalten, bis Lasttests den Durchsatz pro Pod als Engpass zeigen. |
 | `enableServiceLinks: false` | Geringer Nutzen. |
+
+## [update] 2026-11-08: Umstieg auf UBI 10 (Tomcat bleibt)
+
+- Base-Images: `ubi10/openjdk-25` (Build) und `ubi10/openjdk-25-runtime` (Runtime) statt eclipse-temurin alpine. Zwei Stages, Training in der Build-Stage nach `/app`, keine `RUN`-Befehle in der Runtime-Stage.
+- Reihenfolge `pom.xml` → `dependency:go-offline` → `src` → Build, Cache-Mount `/home/default/.m2,uid=185`, `mvn` statt `mvnw`.
+- Extraktion mit `--application-filename app.jar`, Start mit `-jar /app/app.jar`. Kein `entrypoint.sh` mehr: Exec-Form-ENTRYPOINT, JVM-Optionen per `JAVA_TOOL_OPTIONS` (statt `JAVA_OPTS` in Charts, manifests, `check.py`, `check.sh`).
+- User 185 statt 1000 (`runAsUser`/`fsGroup` in `chart/`, `chart-hpa/`, `manifests/`).
+- `service/src/layers.xml` mit `observability-dependencies` und `application-resources`, aktiviert in der `pom.xml`.
+- OCI-Labels gesetzt.
+- Gemessen (`-m 256m`, read-only, 1 CPU): Start 0,38 s, Tomcat auf 8080 und 8081, ca. 93 MiB, 7519 von 8771 Klassen aus dem AOT-Cache, `app.aot` 59 MB, Image 632 MB.

@@ -285,13 +285,13 @@ def parse_size_to_mi(raw):
 
 
 def check_jvm_memory(pod, mem_limit_bytes):
-    # liest nur JAVA_OPTS aus /proc/1/environ und rechnet die effektiven Werte selbst aus,
+    # liest nur JAVA_TOOL_OPTIONS aus /proc/1/environ und rechnet die effektiven Werte selbst aus,
     # statt dafuer einen zusaetzlichen "java -version"-Prozess im Container zu starten
-    section("Effektive JVM-Speicherwerte (aus JAVA_OPTS berechnet)")
+    section("Effektive JVM-Speicherwerte (aus JAVA_TOOL_OPTIONS berechnet)")
 
-    raw_opts = kubectl_exec(pod, "tr '\\0' '\\n' < /proc/1/environ | sed -n 's/^JAVA_OPTS=//p'").strip()
+    raw_opts = kubectl_exec(pod, "tr '\\0' '\\n' < /proc/1/environ | sed -n 's/^JAVA_TOOL_OPTIONS=//p'").strip()
     if not raw_opts:
-        warn_line("JAVA_OPTS nicht aus /proc/1/environ lesbar (kein Zugriff oder Variable nicht gesetzt).")
+        warn_line("JAVA_TOOL_OPTIONS nicht aus /proc/1/environ lesbar (kein Zugriff oder Variable nicht gesetzt).")
         return
 
     def flag_value(name):
@@ -303,7 +303,7 @@ def check_jvm_memory(pod, mem_limit_bytes):
         if size_mi is not None:
             kv(flag, f"{size_mi:.1f}Mi")
         else:
-            info_line(f"{flag} nicht in JAVA_OPTS gesetzt (JVM-Default)")
+            info_line(f"{flag} nicht in JAVA_TOOL_OPTIONS gesetzt (JVM-Default)")
 
     if "-XX:-UsePerfData" in raw_opts:
         kv("UsePerfData", "false")

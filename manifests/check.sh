@@ -157,20 +157,20 @@ for POD in ${PODS}; do
     printf "Java-Prozess RSS (/proc/1/status): %.1fMi\n", rss_mi
   }'
 
-  # --- Effektive JVM-Speicherwerte: liest die tatsaechlich laufenden JAVA_OPTS aus dem Pod
+  # --- Effektive JVM-Speicherwerte: liest die tatsaechlich laufenden JAVA_TOOL_OPTIONS aus dem Pod
   # (statt sie hier zu duplizieren, was bei Aenderungen im Deployment sonst leicht veraltet)
   # und bestaetigt, dass Heap-Ergonomics, MaxMetaspaceSize, MaxDirectMemorySize und
   # UsePerfData im Pod-Cgroup wie konfiguriert greifen ---
   echo
-  echo "--- Effektive JVM-Speicherwerte (aus den tatsaechlichen JAVA_OPTS des laufenden Pods) ---"
-  RUNNING_JAVA_OPTS=$(kubectl exec -n "${NAMESPACE}" "${POD}" -c hello-world -- \
-    sh -c "tr '\0' '\n' < /proc/1/environ | sed -n 's/^JAVA_OPTS=//p'" 2>/dev/null || true)
+  echo "--- Effektive JVM-Speicherwerte (aus den tatsaechlichen JAVA_TOOL_OPTIONS des laufenden Pods) ---"
+  RUNNING_JAVA_TOOL_OPTIONS=$(kubectl exec -n "${NAMESPACE}" "${POD}" -c hello-world -- \
+    sh -c "tr '\0' '\n' < /proc/1/environ | sed -n 's/^JAVA_TOOL_OPTIONS=//p'" 2>/dev/null || true)
 
-  if [[ -z "${RUNNING_JAVA_OPTS}" ]]; then
-    echo "JAVA_OPTS nicht aus /proc/1/environ lesbar (Pod ohne Zugriff auf /proc/1 oder Variable nicht gesetzt)."
+  if [[ -z "${RUNNING_JAVA_TOOL_OPTIONS}" ]]; then
+    echo "JAVA_TOOL_OPTIONS nicht aus /proc/1/environ lesbar (Pod ohne Zugriff auf /proc/1 oder Variable nicht gesetzt)."
   else
     kubectl exec -n "${NAMESPACE}" "${POD}" -c hello-world -- \
-      sh -c "java ${RUNNING_JAVA_OPTS} -XX:+PrintFlagsFinal -version 2>/dev/null \
+      sh -c "java ${RUNNING_JAVA_TOOL_OPTIONS} -XX:+PrintFlagsFinal -version 2>/dev/null \
         | grep -E 'MaxHeapSize|InitialHeapSize|MaxMetaspaceSize|MaxDirectMemorySize|UsePerfData'" \
       | awk '{
           if ($2 == "UsePerfData") { printf "%-20s = %s\n", $2, $4 }

@@ -3,6 +3,9 @@
 # --- Build & AOT-Verarbeitung ---
 # Voraussetzung: pom.xml enthaelt <start-class>...Application</start-class>
 # und <java.version>25</java.version> (siehe readme.md)
+#
+# [update] Basis-Images UBI 10 (Build: openjdk-25, Runtime: openjdk-25-runtime)
+# statt eclipse-temurin alpine. Webserver bleibt Tomcat (bewusste Entscheidung, kein Jetty).
 
 # --- Optionaler Build-Kontext fuer git-commit-id-maven-plugin ---
 # Leere Default-Stage. Mit "docker build --build-context git=.git service/" ersetzt
@@ -11,10 +14,19 @@
 # nur ohne git.properties (/actuator/info liefert dann {}).
 FROM scratch AS git
 
-FROM eclipse-temurin:25-jdk-alpine AS builder
-WORKDIR /workspace
-COPY .mvn ./.mvn
-COPY mvnw pom.xml ./
+FROM registry.access.redhat.com/ubi10/openjdk-25:latest AS build
+# [update] UBI-Build-Image laeuft als User 185 mit HOME=/home/default. WORKDIR legt Verzeichnisse
+# als root an, daher einmalig root: /build (Maven) und /app (Training) fuer 185 schreibbar machen.
+USER root
+RUN mkdir /build /app && chown 185:0 /build /app
+USER 185
+WORKDIR /build
+
+# [update] Reihenfolge pom.xml -> go-offline -> src -> Build (Layer-Caching).
+# Cache-Mount auf /home/default/.m2 mit uid=185, sonst lädt jeder Build alle Dependencies neu.
+COPY pom.xml .
+RUN --mount=type=cache,target=/home/default/.m2,uid=185 mvn -q dependency:go-offline
+
 COPY src ./src
 # JavaC Compiler Infos
 # javac optimiert praktisch nicht, das übernimmt zur Laufzeit der JIT (C1/C2).
@@ -58,55 +70,75 @@ COPY src ./src
 # Ohne --build-context ist /workspace/.git ein leeres Verzeichnis. Das Plugin haelt es fuer
 # ein Repo und bricht ab (failOnNoGitDirectory greift nicht), daher dann ganz ueberspringen.
 ARG BUILD_CPUS=2
-RUN --mount=type=cache,target=/root/.m2 \
-    --mount=type=bind,from=git,target=/workspace/.git,rw \
+RUN --mount=type=cache,target=/home/default/.m2,uid=185 \
+    --mount=type=bind,from=git,target=/build/.git,rw \
     GIT_SKIP=$([ -f .git/HEAD ] || echo -Dmaven.gitcommitid.skip=true) && \
     JAVA_TOOL_OPTIONS="-XX:ActiveProcessorCount=${BUILD_CPUS}" \
-    ./mvnw -q -Pdocker ${GIT_SKIP} -Dmaven.test.skip=true compile spring-boot:process-aot package
+    mvn -q -Pdocker ${GIT_SKIP} -Dmaven.test.skip=true compile spring-boot:process-aot package
 
-# --- Extraktion (kleineres, cachefreundlicheres Runtime-Image) ---
-# NEU: ohne --launcher. Der JDK-AOT-Cache (siehe Runtime-Stage) funktioniert nur
-# mit "java -jar application.jar" und einem Classpath aus dem Jar-Manifest. Mit
-# dem JarLauncher (Nested-Jar-Classloader) koennen die Anwendungs- und
-# Library-Klassen nicht aus dem Cache geladen werden.
-FROM eclipse-temurin:25-jdk-alpine AS extractor
-WORKDIR /workspace
-COPY --from=builder /workspace/target/*.jar application.jar
-RUN java -Djarmode=tools -jar application.jar extract --layers --destination extracted
+# --- Extraktion + Training ---
+# Ohne --launcher: der JDK-AOT-Cache funktioniert nur mit "java -jar app.jar" und einem Classpath
+# aus dem Jar-Manifest (lib/*.jar). Mit dem JarLauncher (Nested-Jar-Classloader) koennen die
+# Anwendungs- und Library-Klassen nicht aus dem Cache geladen werden.
+# [update] --application-filename app.jar, Start zur Laufzeit mit -jar /app/app.jar.
+RUN JAR=$(ls target/*.jar | grep -v original) && \
+    java -Djarmode=tools -jar "$JAR" extract --layers --application-filename app.jar --destination extracted
 
-# --- Runtime ---
-FROM eclipse-temurin:25-jre-alpine
-# feste UID/GID, damit sie exakt zu runAsUser/fsGroup in manifests/deployment.yaml passen
-RUN addgroup -g 1000 -S spring && adduser -u 1000 -S spring -G spring
-WORKDIR /app
-COPY --from=extractor /workspace/extracted/dependencies/ ./
-COPY --from=extractor /workspace/extracted/spring-boot-loader/ ./
-COPY --from=extractor /workspace/extracted/snapshot-dependencies/ ./
-COPY --from=extractor /workspace/extracted/application/ ./
-
-# NEU: JDK-25-AOT-Cache (JEP 483/514/515) per Trainingslauf erzeugen.
+# [update] Layer nach /app zusammenfuehren (gleiche Pfade wie zur Laufzeit, cp -a erhaelt mtime)
+# und dort trainieren. Pfade, Groessen und mtimes der JARs muessen zur Runtime identisch sein.
 # spring.context.exit=onRefresh beendet die App direkt nach dem Context-Refresh,
 # d.h. alle beim Start geladenen/gelinkten Klassen landen im Cache, ohne dass
 # der Webserver wirklich Requests annimmt.
-# Laeuft bewusst in der Runtime-Stage, weil der Cache nur mit exakt derselben
-# JVM (Build) und demselben Classpath gueltig ist.
-# ACHTUNG: GC und UseCompactObjectHeaders muessen zu javaOpts im Helm-Chart
-# passen, sonst verwirft die JVM den Cache beim Start (nur Warnung, kein Fehler,
-# dann aber ohne Startzeit-Gewinn). -Dspring.aot.enabled=true, damit die
-# Spring-AOT-Klassen (statt Reflection-Pfad) trainiert werden.
-RUN java \
-      -XX:AOTCacheOutput=app.aot \
-      -XX:+UseSerialGC \
-      -XX:+UseCompactObjectHeaders \
-      -Dspring.aot.enabled=true \
-      -Dspring.context.exit=onRefresh \
-      -jar application.jar
+# ACHTUNG: GC und UseCompactObjectHeaders muessen zu ENTRYPOINT (und javaOpts im Helm-Chart)
+# passen, sonst verwirft die JVM den Cache beim Start (nur Warnung, dann ohne Startzeit-Gewinn).
+# G1/Serial explizit setzen, sonst waehlt die JVM nach CPU/RAM des Build-Containers.
+# [update] Kein "|| [ -f ... ]"-Guard: ein kaputter Trainingslauf soll den Build brechen.
+WORKDIR /app
+RUN for layer in dependencies observability-dependencies spring-boot-loader snapshot-dependencies application-resources application; do \
+      [ -d /build/extracted/$layer ] && cp -a /build/extracted/$layer/. /app/; \
+    done
+RUN java -XX:AOTCacheOutput=/app/app.aot \
+         -XX:+UseSerialGC \
+         -XX:+UseCompactObjectHeaders \
+         -Dspring.aot.enabled=true \
+         -Dspring.context.exit=onRefresh \
+         -jar /app/app.jar
 
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh && chown -R spring:spring /app
+# --- Runtime ---
+# [update] Gleiche JVM wie im Build-Image (Pflicht fuer den AOT-Cache). Nach Base-Image-Updates
+# beide :latest-Tags neu ziehen (docker pull).
+FROM registry.access.redhat.com/ubi10/openjdk-25-runtime:latest
 
-# numerisch statt namentlich, damit runAsNonRoot/runAsUser in
-# manifests/deployment.yaml die UID zuverlaessig auswerten koennen
-USER 1000:1000
-EXPOSE 8080
-ENTRYPOINT ["/entrypoint.sh"]
+# [update] OCI-Labels version synchron zur pom.xml halten.
+LABEL org.opencontainers.image.title="helloworld" \
+      org.opencontainers.image.description="Spring Boot Hello-World (Tomcat) fuer Kubernetes mit Spring AOT und JDK-25-AOT-Cache" \
+      org.opencontainers.image.version="0.0.1-SNAPSHOT" \
+      org.opencontainers.image.vendor="wlanboy" \
+      org.opencontainers.image.source="https://github.com/wlanboy/Java-within-kubernetes" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.base.name="registry.access.redhat.com/ubi10/openjdk-25-runtime:latest"
+
+WORKDIR /app
+# [update] Layer laut src/layers.xml einzeln (seltenste Aenderung zuerst) aus der Extraktion, COPY erhaelt die mtime.
+# spring-boot-loader bleibt ohne --launcher leer, der Schritt bleibt trotzdem stehen.
+COPY --from=build --chown=185:185 /build/extracted/dependencies/ ./
+COPY --from=build --chown=185:185 /build/extracted/observability-dependencies/ ./
+COPY --from=build --chown=185:185 /build/extracted/spring-boot-loader/ ./
+COPY --from=build --chown=185:185 /build/extracted/snapshot-dependencies/ ./
+COPY --from=build --chown=185:185 /build/extracted/application-resources/ ./
+COPY --from=build --chown=185:185 /build/extracted/application/ ./
+COPY --from=build --chown=185:185 /app/app.aot ./
+
+# [update] User 185 (UBI-Standard) statt 1000: runAsUser/fsGroup in Charts und manifests angepasst.
+USER 185
+# 8080 = App, 8081 = Actuator (management.server.port)
+EXPOSE 8080 8081
+# [update] Exec-Form statt entrypoint.sh (Skript entfaellt). Zusaetzliche JVM-Optionen kommen aus
+# JAVA_TOOL_OPTIONS (Helm: javaOpts). GC-/Header-Flags identisch zum Trainingslauf.
+ENTRYPOINT ["java", \
+  "-XX:AOTCache=/app/app.aot", \
+  "-Dspring.aot.enabled=true", \
+  "-XX:+UseSerialGC", \
+  "-XX:+UseCompactObjectHeaders", \
+  "-XX:+ExitOnOutOfMemoryError", \
+  "-jar", "/app/app.jar"]

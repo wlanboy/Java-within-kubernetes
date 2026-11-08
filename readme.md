@@ -51,14 +51,14 @@ Im Cluster baut die Tekton-Pipeline in [tekton/](tekton/readme.md) das Image mit
 
 ---
 
-## JVM-Flags (`JAVA_OPTS` in `manifests/deployment.yaml`)
+## JVM-Flags (`JAVA_TOOL_OPTIONS` in `manifests/deployment.yaml`)
 
 | Flag | Begründung |
 |---|---|
 | ~~`-Djava.security.egd=file:/dev/./urandom`~~ **entfernt** | **ENTFERNT (2026-09-27).** Seit JDK 9 wirkungslos: `SecureRandom` nutzt unter Linux standardmäßig `NativePRNG` mit `/dev/urandom` und blockiert nicht mehr. Seit Kernel 5.6 blockiert außerdem auch `/dev/random` nach der Initialisierung nicht mehr. Der Workaround stammt aus der Java-8-Zeit. |
 | 🆕 `-XX:+UseCompactObjectHeaders` | **NEU (2026-09-27).** JEP 519, seit JDK 25 regulär verfügbar: Objekt-Header 8 statt 12 Byte. Weniger Heap-Verbrauch (typisch 10–20 % bei vielen kleinen Objekten) und bessere Cache-Lokalität. **Muss zum AOT-Cache-Trainingslauf im Dockerfile passen**, siehe [AOT Cache](#-aot-cache-jdk-25). |
 | 🆕 `-XX:NativeMemoryTracking=summary` | **NEU (2026-09-27).** Macht den gesamten Speicher der JVM (Heap, Metaspace, Code-Cache, Threads, GC, AOT-Cache …) per `jcmd` messbar. Grundlage für die Wahl von `resources.memory` und `MaxRAMPercentage`, siehe [Speicher messen](#-speicher-messen-native-memory-tracking). Kostet etwa 1–2 % Speicher und etwas CPU. Kann nach der Messung wieder raus. |
-| 🆕 `-XX:AOTCache=/app/app.aot` | **NEU (2026-09-27).** Steht in `service/entrypoint.sh`, nicht in `javaOpts`, weil der Pfad zum Image gehört. Siehe [AOT Cache](#-aot-cache-jdk-25). |
+| 🆕 `-XX:AOTCache=/app/app.aot` | **NEU (2026-09-27).** Steht im ENTRYPOINT des Dockerfiles, nicht in `javaOpts`, weil der Pfad zum Image gehört. Siehe [AOT Cache](#-aot-cache-jdk-25). |
 | `-XX:+ExitOnOutOfMemoryError` | Lässt die JVM bei einem echten OOM sofort beenden, statt in einem undefinierten Zombie-Zustand weiterzulaufen. In Kubernetes ist das erwünscht: Der Container stirbt sauber, die Liveness-Probe schlägt fehl (oder der Exit passiert direkt) und Kubernetes startet den Pod neu. |
 | `-XX:MaxRAMPercentage=70.0` | Container-aware JVMs (seit JDK 10) leiten die Heap-Größe standardmäßig aus dem cgroup-Memory-Limit ab. Ohne diese Flags nutzt die JVM nur 25 % des Limits als Heap. 70 % lassen ausreichend Puffer für Metaspace, Thread-Stacks, Code-Cache und Off-Heap-Buffer innerhalb des `resources.limits.memory` (hier 512Mi → Heap ≈ 358Mi). |
 | `-XX:InitialRAMPercentage=70.0` | Initial- = Max-Heap, damit die Heap-Größe nicht erst über mehrere GC-Zyklen zur Laufzeit hochwächst (schnellerer, stabilerer Start; für kleine, kurzlebige Microservices üblich). |
@@ -83,7 +83,7 @@ Im Cluster baut die Tekton-Pipeline in [tekton/](tekton/readme.md) das Image mit
 
 1. `service/Dockerfile`: Extraktion **ohne** `--launcher`. Der Cache funktioniert nur mit `java -jar application.jar` und dem Classpath aus dem Jar-Manifest. Mit dem `JarLauncher` (Nested-Jar-Classloader) lassen sich die Anwendungs- und Library-Klassen nicht aus dem Cache laden.
 2. `service/Dockerfile`: Trainingslauf in der Runtime-Stage mit `-XX:AOTCacheOutput=app.aot -Dspring.context.exit=onRefresh`. `onRefresh` beendet die App direkt nach dem Context-Refresh, der Build braucht also kein Netzwerk und keine ConfigMap. Er läuft in der Runtime-Stage, weil der Cache nur mit exakt derselben JVM gültig ist.
-3. `service/entrypoint.sh`: `java ${JAVA_OPTS} -XX:AOTCache=/app/app.aot -jar /app/application.jar`.
+3. `service/Dockerfile` (ENTRYPOINT, Exec-Form): `java -XX:AOTCache=/app/app.aot ... -jar /app/app.jar`.
 
 **Gemessen** (lokal, `docker run --cpus=1 -m 512m`, je 3 Läufe):
 
@@ -120,7 +120,7 @@ EOF
 
 POD=$(kubectl get pod -n <namespace> -l app=hello-world -o jsonpath='{.items[0].metadata.name}')
 
-kubectl debug -n <namespace> $POD --image=eclipse-temurin:25-jdk-alpine \
+kubectl debug -n <namespace> $POD --image=registry.access.redhat.com/ubi10/openjdk-25:latest \
   --target=hello-world --profile=restricted --custom=nmt-debug.json \
   -c nmt -- sleep 3600
 
@@ -209,7 +209,7 @@ Die JDK-Version des Debug-Images muss zur JVM passen (25). `-XX:-UsePerfData` st
 - `server.shutdown=graceful` + `spring.lifecycle.timeout-per-shutdown-phase=30s` sorgen dafür, dass Tomcat laufende Requests zu Ende bearbeitet, statt sie hart zu kappen.
 - `terminationGracePeriodSeconds: 40` im Deployment gibt der Anwendung mehr Zeit als die 30s Spring-internes Timeout, damit Kubernetes nicht per SIGKILL dazwischenfunkt.
 - Der `preStop`-Hook (`sleep 5`) verzögert den eigentlichen Shutdown kurz, damit der Istio-Sidecar den Pod aus dem Envoy-Routing entfernen kann, bevor Tomcat aufhört, neue Verbindungen anzunehmen. Vermeidet vereinzelte 503er während Rolling Updates.
-- 🆕 **NEU (2026-09-27): native preStop-Sleep-Action** in den Helm-Charts (`lifecycle.preStop.sleep.seconds`, GA seit Kubernetes 1.34) statt `exec: sh -c "sleep 5"`. Der Kubelet wartet selbst, dafür braucht das Image weder Shell noch `sleep`-Binary, und es entsteht kein zusätzlicher Prozess im Container. Hinweis: Das Image enthält weiterhin eine Shell, weil `entrypoint.sh` sie für `${JAVA_OPTS}` braucht.
+- 🆕 **NEU (2026-09-27): native preStop-Sleep-Action** in den Helm-Charts (`lifecycle.preStop.sleep.seconds`, GA seit Kubernetes 1.34) statt `exec: sh -c "sleep 5"`. Der Kubelet wartet selbst, dafür braucht das Image weder Shell noch `sleep`-Binary, und es entsteht kein zusätzlicher Prozess im Container. [update] Das Image (UBI 10) nutzt Exec-Form-ENTRYPOINT und `JAVA_TOOL_OPTIONS`, `entrypoint.sh` entfällt.
 - 🆕 **NEU (2026-09-27): Istio als nativer Sidecar** (Pod-Annotation `sidecar.istio.io/nativeSidecar: "true"`). Istio injiziert `istio-proxy` dann als initContainer mit `restartPolicy: Always`. Kubernetes startet ihn garantiert **vor** dem App-Container und beendet ihn erst **nach** ihm. Ohne das kann die App beim Start Requests senden, bevor Envoy bereit ist, und während preStop + Graceful Shutdown ist Envoy eventuell schon beendet, sodass ausgehende Requests fehlschlagen. Im kind-Cluster geprüft: `init: istio-proxy restartPolicy=Always`.
 - 🆕 **NEU (2026-09-27): `proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'`** als Fallback für Cluster/Istio-Versionen ohne native Sidecars. Mit nativem Sidecar ist das Verhalten ohnehin implizit, die Annotation schadet dann nicht.
 
@@ -236,7 +236,7 @@ Gilt für `chart/` und `chart-hpa/` gleichermaßen. In `manifests/` ist bisher n
 
 | Änderung | Wo | Warum | Details |
 |---|---|---|---|
-| JDK-AOT-Cache | `service/Dockerfile`, `service/entrypoint.sh` | Startzeit etwa halbiert (gemessen 0,9 s statt 1,8 s), wichtig für Scale-up und Scale-from-zero | [AOT Cache](#-aot-cache-jdk-25) |
+| JDK-AOT-Cache | `service/Dockerfile` | Startzeit etwa halbiert (gemessen 0,9 s statt 1,8 s), wichtig für Scale-up und Scale-from-zero | [AOT Cache](#-aot-cache-jdk-25) |
 | `-XX:+UseCompactObjectHeaders` | `javaOpts`, `manifests/deployment.yaml`, Dockerfile-Training | weniger Heap | [JVM-Flags](#jvm-flags-java_opts-in-manifestsdeploymentyaml) |
 | `-XX:NativeMemoryTracking=summary` | `javaOpts` | `resources.memory` auf Messwerte statt Schätzung stützen | [Speicher messen](#-speicher-messen-native-memory-tracking) |
 | Virtual Threads | `application.properties` (Build-Zeit) | Blockierendes I/O belegt keine Plattform-Threads | [Server-/Tomcat-Konfiguration](#server-tomcat-konfiguration-manifestsconfigmapyaml) |

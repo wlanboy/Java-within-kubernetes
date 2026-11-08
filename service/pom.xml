@@ -38,6 +38,20 @@
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc</artifactId>
+			<!-- Minimaler Tomcat: kein WebSocket (Spring Boot konfiguriert WebSocket nur
+			     @ConditionalOnClass) und keine Expression Language (nur fuer JSP und
+			     Bean-Validation-Messages noetig, beides wird nicht genutzt).
+			     Pruefen: ./mvnw dependency:tree -Dincludes=org.apache.tomcat.embed:* -->
+			<exclusions>
+				<exclusion>
+					<groupId>org.apache.tomcat.embed</groupId>
+					<artifactId>tomcat-embed-websocket</artifactId>
+				</exclusion>
+				<exclusion>
+					<groupId>org.apache.tomcat.embed</groupId>
+					<artifactId>tomcat-embed-el</artifactId>
+				</exclusion>
+			</exclusions>
 		</dependency>
 		<dependency>
 			<groupId>io.micrometer</groupId>
@@ -61,6 +75,13 @@
 			<plugin>
 				<groupId>org.springframework.boot</groupId>
 				<artifactId>spring-boot-maven-plugin</artifactId>
+				<!-- [update] eigene Layer (observability-dependencies, application-resources), siehe src/layers.xml -->
+				<configuration>
+					<layers>
+						<enabled>true</enabled>
+						<configuration>${project.basedir}/src/layers.xml</configuration>
+					</layers>
+				</configuration>
 			</plugin>
 			<plugin>
 				<groupId>io.github.git-commit-id</groupId>
