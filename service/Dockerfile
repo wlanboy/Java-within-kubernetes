@@ -1,74 +1,70 @@
 # syntax=docker/dockerfile:1
 
-# --- Build & AOT-Verarbeitung ---
-# Voraussetzung: pom.xml enthaelt <start-class>...Application</start-class>
-# und <java.version>25</java.version> (siehe readme.md)
+# Spring Boot (Tomcat) auf UBI 10 mit Spring AOT und JDK-25-AOT-Cache.
 #
-# [update] Basis-Images UBI 10 (Build: openjdk-25, Runtime: openjdk-25-runtime)
-# statt eclipse-temurin alpine. Webserver bleibt Tomcat (bewusste Entscheidung, kein Jetty).
+# Stage "build":   Maven-Build mit process-aot, Extraktion der Layer, Trainingslauf für den AOT-Cache
+# Runtime-Stage:   ubi10/openjdk-25-runtime, nur JRE, keine RUN-Befehle
+#
+# Voraussetzung in der pom.xml: <java.version>25</java.version> und
+# <start-class>com.example.helloworld.HelloworldApplication</start-class>.
+# Erklärung aller Schritte: readme.md, Abschnitt "Docker-Image".
 
-# --- Optionaler Build-Kontext fuer git-commit-id-maven-plugin ---
-# Leere Default-Stage. Mit "docker build --build-context git=.git service/" ersetzt
-# BuildKit sie durch das .git-Verzeichnis des Repos (Kontext service/ enthaelt kein .git).
-# Ohne den Parameter bleibt sie leer, der Build laeuft trotzdem durch,
-# nur ohne git.properties (/actuator/info liefert dann {}).
+# --- Optionaler Build-Kontext für das git-commit-id-maven-plugin ---
+# Leere Default-Stage. Mit "docker build --build-context git=.git service/" ersetzt BuildKit
+# sie durch das .git-Verzeichnis des Repos (der Kontext service/ enthält kein .git).
+# Ohne den Parameter bleibt sie leer: Der Build läuft durch, es fehlt nur git.properties
+# (/actuator/info liefert dann {}).
 FROM scratch AS git
 
 FROM registry.access.redhat.com/ubi10/openjdk-25:latest AS build
-# [update] UBI-Build-Image laeuft als User 185 mit HOME=/home/default. WORKDIR legt Verzeichnisse
-# als root an, daher einmalig root: /build (Maven) und /app (Training) fuer 185 schreibbar machen.
+# Das UBI-Build-Image läuft als User 185 mit HOME=/home/default. WORKDIR legt fehlende
+# Verzeichnisse als root an, deshalb hier einmal als root /build (Maven) und /app (Training)
+# anlegen und 185 übergeben.
 USER root
 RUN mkdir /build /app && chown 185:0 /build /app
 USER 185
 WORKDIR /build
 
-# [update] Reihenfolge pom.xml -> go-offline -> src -> Build (Layer-Caching).
-# Cache-Mount auf /home/default/.m2 mit uid=185, sonst lädt jeder Build alle Dependencies neu.
+# Erst nur die pom.xml kopieren und die Dependencies laden. Dieser Layer bleibt gecacht,
+# solange sich die pom.xml nicht ändert; Änderungen am Code laden nichts neu.
+# Cache-Mount auf ~/.m2 des Users 185. uid=185 ist nötig, sonst gehört der Mount root und
+# Maven kann nicht hineinschreiben. Ein Mount auf /root/.m2 würde nie benutzt.
 COPY pom.xml .
 RUN --mount=type=cache,target=/home/default/.m2,uid=185 mvn -q dependency:go-offline
 
 COPY src ./src
-# JavaC Compiler Infos
-# javac optimiert praktisch nicht, das übernimmt zur Laufzeit der JIT (C1/C2).
-# Startzeit/Speicher gewinnt man hier über Spring AOT und den JDK-AOT-Cache.
+
+# javac-Optionen: Hier gibt es nichts zu holen. javac optimiert praktisch nicht, das macht zur
+# Laufzeit der JIT. Startzeit und Speicher gewinnt man über Spring AOT und den AOT-Cache.
 #
-# Option                      Wirkung
-# -O                          Wird seit JDK 1.3 ignoriert, das Flag existiert nur noch aus Kompatibilitätsgründen
-# -g:none                     Entfernt Debug-Infos. Die Klassendateien werden etwas kleiner, schneller wird die Ausführung nicht,
-#                             weil der JIT diese Infos ignoriert. Stacktraces hätten dann keine Zeilennummern mehr.
-# -g:lines,source             Kompromiss: nur Zeilennummern und Dateiname, ohne Namen lokaler Variablen. Gewinn kaum messbar.
-#                             Maven-Default ist -g (debug=true), also alle Debug-Infos.
-# -parameters                 Wird für Spring gebraucht (Parameternamen bei DI und @PathVariable). spring-boot-starter-parent setzt es
-# -encoding UTF-8             Quellcode-Encoding. spring-boot-starter-parent setzt project.build.sourceEncoding=UTF-8
-# -proc:full                  Seit JDK 23 ist -proc:none der Default, Annotation Processing läuft nur noch, wenn es explizit
-#                             aktiviert wird. Hier nicht nötig: <annotationProcessorPaths> in der pom.xml
-#                             (spring-boot-configuration-processor) erzeugt --processor-path und aktiviert es damit
-# -Xlint:all                  Zusätzliche Warnungen (deprecation, unchecked, ...). Nur Codequalität, keine Performance
-# -Werror                     Macht Warnungen zu Fehlern. Sinnvoll in der CI, kein Laufzeiteffekt
-# -implicit:none              Keine Klassendateien für implizit mitgeladene Quellen. Bei Maven ohne Wirkung, alle Quellen sind explizit
-# useIncrementalCompilation   Maven-Option, Default true.
-# -T 1C (Maven)               Paralleler Build. Ohne Wirkung, hier gibt es nur ein Modul
+#   -O                    seit JDK 1.3 ignoriert
+#   -g:none               kleinere Klassendateien, aber nicht schneller (der JIT ignoriert Debug-Infos);
+#                         Stacktraces hätten keine Zeilennummern mehr
+#   -g:lines,source       nur Zeilennummern und Dateiname, Gewinn kaum messbar
+#   -parameters           braucht Spring (Parameternamen für DI und @PathVariable)
+#   -proc:full            seit JDK 23 ist -proc:none Default. Hier nicht nötig, weil
+#                         <annotationProcessorPaths> (spring-boot-configuration-processor)
+#                         --processor-path setzt und Annotation Processing damit aktiviert
+#   -Xlint:all / -Werror  nur Codequalität, kein Laufzeiteffekt
+#   -T 1C (Maven)         paralleler Build, ohne Wirkung bei nur einem Modul
 #
-# Bereits durch spring-boot-starter-parent 4.1.1 gesetzt (geprüft mit mvn help:effective-pom):
-#   maven-compiler-plugin 3.15.0 mit <parameters>true</parameters>  -> -parameters
-#   maven.compiler.release=${java.version} (25)                     -> --release 25
-#   project.build.sourceEncoding=UTF-8                              -> -encoding UTF-8
-#   debug=true (Plugin-Default, kein debuglevel)                    -> -g
+# spring-boot-starter-parent 4.1.x setzt bereits (geprüft mit mvn help:effective-pom):
+#   <parameters>true</parameters> -> -parameters, maven.compiler.release=25 -> --release 25,
+#   project.build.sourceEncoding=UTF-8 -> -encoding UTF-8, debug=true -> -g
 #
-# CPU-Limit fuer den Build: BuildKit kennt kein --cpus pro RUN-Step, daher
-# begrenzt -XX:ActiveProcessorCount die CPUs, die die JVM sieht (GC-Threads,
-# JIT-Compiler-Threads, ForkJoin-Pool). JAVA_TOOL_OPTIONS statt MAVEN_OPTS, weil
-# spring-boot:process-aot eine eigene JVM forkt, die MAVEN_OPTS nicht sieht.
-# javac laeuft im Maven-Prozess und ist damit mit abgedeckt.
-# Ueberschreiben: docker build --build-arg BUILD_CPUS=4
-#
-# -Dmaven.test.skip=true statt -DskipTests: -DskipTests kompiliert die Tests trotzdem
-# (testCompile), und zwar jedes Mal komplett neu, weil process-aot in target/classes schreibt.
-# .git kommt als Bind-Mount aus der Stage "git" (siehe oben) und landet in keinem Layer.
-# rw: JGit darf z.B. den Index-Cache aktualisieren, die Aenderungen werden verworfen.
-# -Pdocker laesst git.dirty weg (siehe Profil in der pom.xml).
-# Ohne --build-context ist /workspace/.git ein leeres Verzeichnis. Das Plugin haelt es fuer
-# ein Repo und bricht ab (failOnNoGitDirectory greift nicht), daher dann ganz ueberspringen.
+# Build-Befehl:
+# - compile vor spring-boot:process-aot ist Pflicht, package baut das JAR inkl. AOT-Klassen.
+# - -Dmaven.test.skip=true statt -DskipTests: -DskipTests kompiliert die Tests trotzdem, und zwar
+#   jedes Mal komplett neu, weil process-aot in target/classes schreibt.
+# - CPU-Limit: BuildKit kennt kein --cpus pro RUN-Step. -XX:ActiveProcessorCount begrenzt die CPUs,
+#   die die JVM sieht (GC-, JIT- und ForkJoin-Threads). JAVA_TOOL_OPTIONS statt MAVEN_OPTS, weil
+#   process-aot eine eigene JVM forkt, die MAVEN_OPTS nicht sieht. Überschreiben mit
+#   docker build --build-arg BUILD_CPUS=4.
+# - .git kommt als Bind-Mount aus der Stage "git" und landet in keinem Layer. rw, weil JGit z. B.
+#   den Index-Cache aktualisiert; die Änderungen werden verworfen.
+# - -Pdocker lässt git.dirty weg (siehe Profil in der pom.xml).
+# - Ohne --build-context ist /build/.git ein leeres Verzeichnis. Das Plugin hält es für ein Repo
+#   und bricht ab (failOnNoGitDirectory greift nicht), daher wird es dann übersprungen.
 ARG BUILD_CPUS=2
 RUN --mount=type=cache,target=/home/default/.m2,uid=185 \
     --mount=type=bind,from=git,target=/build/.git,rw \
@@ -76,27 +72,29 @@ RUN --mount=type=cache,target=/home/default/.m2,uid=185 \
     JAVA_TOOL_OPTIONS="-XX:ActiveProcessorCount=${BUILD_CPUS}" \
     mvn -q -Pdocker ${GIT_SKIP} -Dmaven.test.skip=true compile spring-boot:process-aot package
 
-# --- Extraktion + Training ---
-# Ohne --launcher: der JDK-AOT-Cache funktioniert nur mit "java -jar app.jar" und einem Classpath
-# aus dem Jar-Manifest (lib/*.jar). Mit dem JarLauncher (Nested-Jar-Classloader) koennen die
-# Anwendungs- und Library-Klassen nicht aus dem Cache geladen werden.
-# [update] --application-filename app.jar, Start zur Laufzeit mit -jar /app/app.jar.
+# --- Extraktion ---
+# Ohne --launcher entsteht application/app.jar mit einem Class-Path-Manifest auf lib/*.jar.
+# Nur so kann der AOT-Cache die Anwendungs- und Library-Klassen aufnehmen. Mit --launcher lädt
+# der JarLauncher die Klassen über einen eigenen Classloader, und die landen nie im Cache.
 RUN JAR=$(ls target/*.jar | grep -v original) && \
     java -Djarmode=tools -jar "$JAR" extract --layers --application-filename app.jar --destination extracted
 
-# [update] Layer nach /app zusammenfuehren (gleiche Pfade wie zur Laufzeit, cp -a erhaelt mtime)
-# und dort trainieren. Pfade, Groessen und mtimes der JARs muessen zur Runtime identisch sein.
-# spring.context.exit=onRefresh beendet die App direkt nach dem Context-Refresh,
-# d.h. alle beim Start geladenen/gelinkten Klassen landen im Cache, ohne dass
-# der Webserver wirklich Requests annimmt.
-# ACHTUNG: GC und UseCompactObjectHeaders muessen zu ENTRYPOINT (und javaOpts im Helm-Chart)
-# passen, sonst verwirft die JVM den Cache beim Start (nur Warnung, dann ohne Startzeit-Gewinn).
-# G1/Serial explizit setzen, sonst waehlt die JVM nach CPU/RAM des Build-Containers.
-# [update] Kein "|| [ -f ... ]"-Guard: ein kaputter Trainingslauf soll den Build brechen.
+# --- Trainingslauf für den AOT-Cache ---
+# Der Cache gilt nur, wenn Training und Laufzeit denselben Classpath haben: gleiche Pfade,
+# Größen und mtimes der JARs. Deshalb die Layer hier nach /app zusammenführen, im selben Layout
+# wie in der Runtime-Stage. cp -a und COPY erhalten die mtime.
 WORKDIR /app
 RUN for layer in dependencies observability-dependencies spring-boot-loader snapshot-dependencies application-resources application; do \
       [ -d /build/extracted/$layer ] && cp -a /build/extracted/$layer/. /app/; \
     done
+# spring.context.exit=onRefresh beendet die App direkt nach dem Context-Refresh. Alle beim Start
+# geladenen Klassen landen im Cache, ohne dass Tomcat Requests annimmt; der Build braucht dafür
+# weder Netzwerk noch ConfigMap.
+# GC und UseCompactObjectHeaders müssen mit ENTRYPOINT und JAVA_TOOL_OPTIONS (Helm javaOpts,
+# manifests/deployment.yaml) übereinstimmen, sonst verwirft die JVM den Cache beim Start
+# (nur eine Warnung, dann ohne Zeitgewinn). Den GC immer explizit setzen: Ohne Angabe wählt
+# die JVM ihn nach CPU und RAM des Build-Containers.
+# Kein "|| [ -f ... ]"-Guard: Der Lauf endet mit Exit 0, ein Fehler soll den Build brechen.
 RUN java -XX:AOTCacheOutput=/app/app.aot \
          -XX:+UseSerialGC \
          -XX:+UseCompactObjectHeaders \
@@ -105,11 +103,11 @@ RUN java -XX:AOTCacheOutput=/app/app.aot \
          -jar /app/app.jar
 
 # --- Runtime ---
-# [update] Gleiche JVM wie im Build-Image (Pflicht fuer den AOT-Cache). Nach Base-Image-Updates
-# beide :latest-Tags neu ziehen (docker pull).
+# Der AOT-Cache gilt nur mit exakt demselben JVM-Build wie im Training. Nach Base-Image-Updates
+# beide :latest-Tags neu ziehen (docker pull), sonst startet die JVM ohne Cache.
 FROM registry.access.redhat.com/ubi10/openjdk-25-runtime:latest
 
-# [update] OCI-Labels version synchron zur pom.xml halten.
+# version synchron zur pom.xml halten
 LABEL org.opencontainers.image.title="helloworld" \
       org.opencontainers.image.description="Spring Boot Hello-World (Tomcat) fuer Kubernetes mit Spring AOT und JDK-25-AOT-Cache" \
       org.opencontainers.image.version="0.0.1-SNAPSHOT" \
@@ -119,8 +117,9 @@ LABEL org.opencontainers.image.title="helloworld" \
       org.opencontainers.image.base.name="registry.access.redhat.com/ubi10/openjdk-25-runtime:latest"
 
 WORKDIR /app
-# [update] Layer laut src/layers.xml einzeln (seltenste Aenderung zuerst) aus der Extraktion, COPY erhaelt die mtime.
-# spring-boot-loader bleibt ohne --launcher leer, der Schritt bleibt trotzdem stehen.
+# Ein COPY pro Layer aus src/layers.xml, seltenste Änderung zuerst. Bei einer Code-Änderung
+# wird nur der letzte Layer (application) neu gebaut und übertragen, die Dependencies bleiben
+# gecacht. spring-boot-loader bleibt ohne --launcher leer, der Schritt bleibt trotzdem stehen.
 COPY --from=build --chown=185:185 /build/extracted/dependencies/ ./
 COPY --from=build --chown=185:185 /build/extracted/observability-dependencies/ ./
 COPY --from=build --chown=185:185 /build/extracted/spring-boot-loader/ ./
@@ -129,12 +128,14 @@ COPY --from=build --chown=185:185 /build/extracted/application-resources/ ./
 COPY --from=build --chown=185:185 /build/extracted/application/ ./
 COPY --from=build --chown=185:185 /app/app.aot ./
 
-# [update] User 185 (UBI-Standard) statt 1000: runAsUser/fsGroup in Charts und manifests angepasst.
+# UBI-Standarduser. In Kubernetes passend runAsUser: 185 und fsGroup: 185.
 USER 185
 # 8080 = App, 8081 = Actuator (management.server.port)
 EXPOSE 8080 8081
-# [update] Exec-Form statt entrypoint.sh (Skript entfaellt). Zusaetzliche JVM-Optionen kommen aus
-# JAVA_TOOL_OPTIONS (Helm: javaOpts). GC-/Header-Flags identisch zum Trainingslauf.
+# Exec-Form ohne Shell und ohne Startskript: java ist PID 1 und bekommt SIGTERM direkt
+# (nötig für Graceful Shutdown). Hier stehen nur die Flags, die zum Image gehören:
+# Cache-Pfad sowie GC- und Header-Flags passend zum Training. Heap, Metaspace, CPU-Anzahl usw.
+# kommen aus JAVA_TOOL_OPTIONS (Helm javaOpts), weil sie zu den Resources des Pods passen müssen.
 ENTRYPOINT ["java", \
   "-XX:AOTCache=/app/app.aot", \
   "-Dspring.aot.enabled=true", \
