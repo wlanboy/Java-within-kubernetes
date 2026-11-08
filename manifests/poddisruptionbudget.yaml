@@ -7,6 +7,9 @@ metadata:
 spec:
   # bei replicas: 2 darf maximal einer gleichzeitig durch Node-Drain/Evacuation weichen
   minAvailable: 1
+  # Pods, die nicht Ready sind (z. B. CrashLoopBackOff), duerfen immer evicted werden.
+  # Mit dem Default (IfHealthyBudget) blockiert ein kaputter Pod jeden Node-Drain (GA seit K8s 1.31)
+  unhealthyPodEvictionPolicy: AlwaysAllow
   selector:
     matchLabels:
       app: hello-world

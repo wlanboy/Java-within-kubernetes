@@ -10,18 +10,17 @@ data:
     server.shutdown=graceful
     server.http2.enabled=true
 
-    # --- Tomcat: klein gehalten, weil der Pod nur 1 CPU-Core zugewiesen bekommt
-    # und zusaetzlich ein Istio-Sidecar auf demselben Node/Pod mitlaeuft.
-    # server.tomcat.threads.max=200 (Default)
-    server.tomcat.threads.max=20
+    # --- Tomcat
+    # Keine server.tomcat.threads.*: Mit spring.threads.virtual.enabled=true (in
+    # src/main/resources/application.properties, wegen Spring AOT zur Build-Zeit gesetzt)
+    # laeuft jeder Request auf einem eigenen Virtual Thread, Tomcat nutzt keinen Worker-Pool.
+    # Die Nebenlaeufigkeit begrenzt max-connections.
     # server.tomcat.max-connections=8192 (Default)
     server.tomcat.max-connections=512
-    # Anzahl der Requests, die in die Warteschlange duerfen, bevor Verbindungen abgelehnt werden
+    # Anzahl der Verbindungen, die in die Warteschlange duerfen, wenn max-connections erreicht ist
     server.tomcat.accept-count=100
     # Anzahl der Processor-Objekte, die Tomcat zur Wiederverwendung vorhaelt (Default: 200)
     server.tomcat.processor-cache=200
-    # Bei threads.max=20 reichen wenige Idle-Threads (Default: 10)
-    server.tomcat.threads.min-spare=5
 
     # --- Timeouts: kurz halten, damit offene Keep-Alive-Verbindungen den graceful shutdown
     # (preStop-sleep von nur 5s, siehe Deployment) nicht verzoegern

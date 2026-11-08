@@ -27,6 +27,11 @@ spec:
         # Prometheus scraped die Pod-IP direkt und geht damit am Service vorbei
         prometheus.io/port: "8081"
         prometheus.io/path: "/actuator/prometheus"
+        # Istio-Sidecar als nativen Sidecar injizieren (initContainer mit restartPolicy: Always):
+        # Envoy startet vor der App und endet erst nach ihr
+        sidecar.istio.io/nativeSidecar: "true"
+        # Fallback fuer Istio-Versionen ohne native Sidecars
+        proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
     spec:
       # Zeit fuer graceful shutdown (Spring: 30s) + Puffer fuer Istio-Draining
       terminationGracePeriodSeconds: 40
@@ -92,7 +97,9 @@ spec:
             # Zeitzone fuer Logs/Timestamps im Container
             - name: TZ
               value: "Europe/Berlin"
-            # JAVA_OPTS: JVM-Flags fuer ressourcenschonenden Betrieb im Container.
+            # JAVA_TOOL_OPTIONS: JVM-Flags fuer ressourcenschonenden Betrieb im Container.
+            # GC- und Header-Flags stehen zusaetzlich im ENTRYPOINT des Images und muessen zum
+            # AOT-Cache-Trainingslauf passen (service/Dockerfile).
             # Reihenfolge der Kommentare entspricht der Reihenfolge der Flags im Wert unten:
             #   -XX:+ExitOnOutOfMemoryError               -> Prozess beendet sich sofort bei Heap-OOM statt in kaputtem Zustand weiterzulaufen; Kubernetes startet den Pod neu
             #   -Xms64m / -Xmx128m                        -> NEU (2026-11-08): fester Heap statt RAM-Prozent; gemessen ~30 MB belegt nach 170k Requests
@@ -158,10 +165,12 @@ spec:
             failureThreshold: 3
           lifecycle:
             preStop:
-              exec:
-                # kurze Wartezeit, damit Istio-Sidecar den Pod aus dem
-                # Endpoint-Routing nimmt, bevor Tomcat den Shutdown beginnt
-                command: ["sh", "-c", "sleep 5"]
+              # kurze Wartezeit, damit Istio-Sidecar den Pod aus dem
+              # Endpoint-Routing nimmt, bevor Tomcat den Shutdown beginnt.
+              # Native Sleep-Action (GA seit Kubernetes 1.34): der Kubelet wartet selbst,
+              # kein Prozess im Container, keine Shell im Image noetig
+              sleep:
+                seconds: 5
           resources:
             requests:
               # niedrig angesetzt fuer engeres Bin-Packing im Node; Burst bis zum
@@ -194,5 +203,7 @@ spec:
             name: hello-world-config
         - name: tmp
           # beschreibbares emptyDir fuer /tmp, noetig weil readOnlyRootFilesystem: true
-          # das Root-Dateisystem des Containers schreibgeschuetzt macht
-          emptyDir: {}
+          # das Root-Dateisystem des Containers schreibgeschuetzt macht.
+          # sizeLimit: laeuft /tmp voll, wird nur dieser Pod evicted
+          emptyDir:
+            sizeLimit: 64Mi
