@@ -1,118 +1,412 @@
 # Java 25 Hello World in Kubernetes
 
-Beispiel-Deployment für einen Spring-Boot-`hello-world.jar` auf
-Java 25, inklusive AOT-Build, JVM-Tuning für geringen CPU- und RAM-Verbrauch
-sowie Kubernetes-Manifesten (gedacht für Betrieb hinter einem Istio-Sidecar, funktioniert aber genauso lokal).
+Beispiel-Deployment für einen Spring-Boot-Service (Tomcat) auf Java 25 mit Spring AOT,
+JDK-AOT-Cache und JVM-Tuning für wenig CPU und RAM. Dazu Kubernetes-Manifeste und zwei
+Helm-Charts, gedacht für den Betrieb hinter einem Istio-Sidecar. Lokal funktioniert alles
+genauso, die Istio-Annotations sind dann ohne Wirkung.
 
-Voraussetzung für den Docker-Build ist ein Maven-Projekt (`pom.xml` + `src/`) neben der
-`service/Dockerfile`, mit folgenden `pom.xml`-Properties
-(siehe auch AOT-Vorgabe für Spring Boot/Java 25):
+Dieses Dokument beschreibt den aktuellen Stand und begründet jede Einstellung. Wann sich was
+geändert hat, steht in [change.md](change.md).
+
+## Inhalt
+
+- [Ergebnis in Zahlen](#ergebnis-in-zahlen)
+- [Deploy](#deploy)
+- [Docker-Image](#docker-image)
+- [Minimaler Tomcat](#minimaler-tomcat)
+- [Build-Zeit-Properties](#build-zeit-properties-application-properties)
+- [Server-/Tomcat-Konfiguration](#server-tomcat-konfiguration-configmap)
+- [JVM-Flags](#jvm-flags-java_tool_options)
+- [Garbage-Collector-Guide](#garbage-collector-guide)
+- [Resource-Limits](#resource-limits)
+- [Speicher messen](#speicher-messen)
+- [Graceful Shutdown & Istio](#graceful-shutdown--istio)
+- [Verfügbarkeit & Sicherheit](#verfügbarkeit--sicherheit)
+- [Geprüft, aber bewusst nicht umgesetzt](#geprüft-aber-bewusst-nicht-umgesetzt)
+
+---
+
+## Ergebnis in Zahlen
+
+Gemessen im kind-Cluster mit Istio-Sidecar (`chart/`, 1 CPU, 130k Requests mit ~4300 req/s),
+verglichen mit dem Stand vor den Optimierungen (eclipse-temurin, `JarLauncher`, kein AOT-Cache,
+`MaxRAMPercentage=70`, Tomcat mit WebSocket und EL).
+
+| | vorher | jetzt |
+|---|---|---|
+| Startzeit (`Started HelloworldApplication in ...`) | 1,7–1,9 s | 0,79 s (Docker, 1 CPU: 0,72–0,84 s) |
+| Heap | 358 MB (70 % von 512Mi, voll committed) | `-Xms64m -Xmx128m`, ~30 MB belegt |
+| NMT committed | 440 MB | 146 MB |
+| RSS unter Last (`memory.peak`) | ~200 MiB | 111–127 MiB |
+| requests / limits | 250m/256Mi, 1/512Mi | 100m/160Mi, 1/320Mi |
+
+Den größten Anteil an der Startzeit hat der JDK-AOT-Cache, den größten Anteil am Speicher der
+feste Heap. Tomcat ohne WebSocket/EL bringt nur wenige MB.
+
+---
 
 ## Deploy
 
 ```bash
 docker build --build-context git=.git -t wlanboy/helloworld:latest service/
 kubectl apply -f manifests/
+# oder per Helm
+helm upgrade --install hello-world chart/
 ```
 
-`--build-context git=.git` reicht das `.git`-Verzeichnis als Bind-Mount in den Maven-Build, damit
-das `git-commit-id-maven-plugin` eine `git.properties` erzeugt (Commit, Branch, Tags unter
+Es gibt drei Varianten mit denselben Einstellungen:
+
+| Verzeichnis | Inhalt |
+|---|---|
+| [manifests/](manifests/) | rohe Manifeste, 2 Replicas |
+| [chart/](chart/) | Helm-Chart, 2 Replicas |
+| [chart-hpa/](chart-hpa/chart-hpa.md) | Helm-Chart mit HorizontalPodAutoscaler und Scale-to-Zero |
+
+Änderungen an JVM-Flags, Resources oder der ConfigMap immer in allen drei nachziehen.
+
+`--build-context git=.git` hängt das `.git`-Verzeichnis als Bind-Mount in den Maven-Build. Das
+`git-commit-id-maven-plugin` erzeugt damit eine `git.properties` (Commit, Branch, Tags unter
 `/actuator/info`). Der Build-Kontext `service/` enthält selbst kein `.git`. Ohne den Parameter
 läuft der Build trotzdem durch, nur ohne Git-Infos.
 
 Im Cluster baut die Tekton-Pipeline in [tekton/](tekton/readme.md) das Image mit BuildKit und pusht es.
 
-**Hinweis zum Image-Tag:** [deployment.yaml](manifests/deployment.yaml) nutzt bewusst `:latest` mit `imagePullPolicy: IfNotPresent` für dieses Beispiel-Repo (schnelles lokales Bauen/Testen ohne Versions-Bumps). Für den produktiven Einsatz sollte stattdessen ein gepinnter Tag (z. B. `1.0.0`) oder ein Image-Digest verwendet werden, damit Rollouts reproduzierbar bleiben und Nodes nicht dauerhaft an ein veraltetes gecachtes `latest`-Image gebunden sind.
+**Hinweis zum Image-Tag.** [deployment.yaml](manifests/deployment.yaml) nutzt für dieses
+Beispiel-Repo bewusst `:latest` mit `imagePullPolicy: IfNotPresent`, damit man lokal ohne
+Versions-Bumps bauen und testen kann. Produktiv gehört dort ein fester Tag (z. B. `1.0.0`) oder
+ein Image-Digest hin. Sonst sind Rollouts nicht reproduzierbar, und Nodes behalten ein altes
+gecachtes `latest`.
 
 ---
 
-## Server-/Tomcat-Konfiguration (`manifests/configmap.yaml`)
+## Docker-Image
 
-| Property | Wert | Begründung |
+[service/Dockerfile](service/Dockerfile) hat zwei Stages:
+
+| Stage | Base Image | Aufgabe |
 |---|---|---|
-| `server.shutdown` | `graceful` | Tomcat nimmt keine neuen Requests mehr an, lässt laufende aber zu Ende laufen, bevor der Prozess stirbt. Zwingend nötig, damit Rolling Updates/Pod-Terminierung ohne 5xx-Fehler ablaufen. Zeitfenster wird über `spring.lifecycle.timeout-per-shutdown-phase` begrenzt. |
-| `server.http2.enabled` | `true` | Reduziert Latenz durch Multiplexing/Header-Kompression, besonders relevant, wenn zusätzlich TLS-Termination am Istio-Sidecar/Ingress erfolgt. |
-| 🆕 `spring.threads.virtual.enabled` | `true` (in `service/src/main/resources/application.properties`) | **NEU (2026-09-27).** Jeder Request läuft auf einem eigenen Virtual Thread statt auf einem Thread aus dem Tomcat-Worker-Pool. Blockierendes I/O belegt dann keinen Plattform-Thread mehr. Das Pinning-Problem bei `synchronized` ist seit JDK 24 behoben (JEP 491). **Muss zur Build-Zeit gesetzt sein**, nicht in der ConfigMap: `spring-boot:process-aot` wertet `@ConditionalOnThreading` beim Build aus und schreibt das Ergebnis fest (gleiches Problem wie bei `management.server.port`). |
-| ~~`server.tomcat.threads.max`~~ | ~~`20`~~ **entfernt** | **ENTFERNT (2026-09-27).** Mit Virtual Threads nutzt Tomcat seinen Worker-Pool nicht mehr, der Wert wäre wirkungslos. Die Nebenläufigkeit begrenzt jetzt `server.tomcat.max-connections`. Früherer Grund: 200 Worker-Threads auf 1 Core bringen nur Context-Switching-Overhead. |
-| `server.tomcat.max-connections` | `512` (statt Default `8192`) | Begrenzt offene Sockets/Speicher pro Connection. 8192 offene Verbindungen sind für einen 1-Core/512Mi-Pod hinter einem Load Balancer/Istio (das selbst schon Verbindungen poolt) weit überdimensioniert und nur unnötiges OOM-Risiko. |
-| `server.tomcat.accept-count` | `100` | Wartschlange für Requests, wenn `max-connections` erreicht ist, statt sie sofort abzulehnen. Wichtig bei kurzen Lastspitzen. |
-| `server.tomcat.processor-cache` | `200` (= Default) | Anzahl der `Processor`-Objekte, die Tomcat zur Wiederverwendung vorhält, statt sie bei jeder Verbindung neu zu erzeugen (GC-Druck). Explizit gesetzt, um die Kopplung an `max-connections` sichtbar zu machen: Bleibt der Wert deutlich über `max-connections`, gibt es keinen Objekt-Recycling-Overhead. |
-| ~~`server.tomcat.threads.min-spare`~~ | ~~`5`~~ **entfernt** | **ENTFERNT (2026-09-27).** Aus demselben Grund wie `threads.max`: ohne Worker-Pool gibt es keine Idle-Threads, die vorgehalten werden. |
-| `server.tomcat.connection-timeout` | `5s` (statt Default `20s`) | Kurz gehalten, damit offene, aber inaktive Verbindungen den graceful shutdown (nur 5s `preStop`-Puffer, siehe unten) nicht verzögern. |
-| `server.tomcat.keep-alive-timeout` | `15s` | Analog zu `connection-timeout`: Keep-Alive-Verbindungen werden zügig geschlossen, statt Worker-Threads unnötig lange zu blockieren. |
-| `server.tomcat.max-keep-alive-requests` | `50` (statt Default `100`) | Begrenzt, wie viele Requests über dieselbe Keep-Alive-Verbindung laufen, bevor sie geschlossen und neu aufgebaut wird. Bei nur 2 Replicas verhindert ein niedrigerer Wert, dass eine lang gehaltene Verbindung dauerhaft an einen einzelnen Pod gebunden bleibt. |
-| `server.forward-headers-strategy` | `framework` | Hinter dem Istio-Sidecar terminiert Envoy TLS/Proxying; damit Spring die `X-Forwarded-*`-Header auswertet (korrekte Client-IP, Schema, Host in Logs/generierten URLs statt der internen Pod-Sicht). |
-| `server.tomcat.mbeanregistry.enabled` | `false` | Deaktiviert die JMX-Registrierung der Tomcat-MBeans. Spart etwas Startzeit/Speicher, da Metriken hier über Actuator/Prometheus laufen, nicht über JMX. |
-| `spring.lifecycle.timeout-per-shutdown-phase` | `30s` | Muss **kleiner** sein als `terminationGracePeriodSeconds` im Deployment (hier 40s inkl. 5s `preStop`-Puffer für Istio-Draining), sonst killt Kubernetes den Prozess per SIGKILL, bevor Graceful Shutdown fertig ist. |
-| `management.server.port` | `8081` (separat von `server.port=8080`) | Actuator (Health/Metrics/Prometheus) läuft auf einem eigenen Port, der im Service (`manifests/service.yaml`) **nicht** exposed wird. Über Istio/Service ist er damit nicht erreichbar, nur direkt an der Pod-IP (siehe `management`-Containerport in `deployment.yaml`, den Probes und die `prometheus.io/port`-Annotation nutzen). |
-| `management.health.probes.enabled` u.a. | `true` | Aktiviert die Kubernetes-spezifischen Actuator-Endpunkte `/actuator/health/liveness` und `/actuator/health/readiness`, die von den Probes im Deployment genutzt werden. |
-| `management.endpoint.health.show-details` | `never` (= Default, explizit gesetzt) | Verhindert, dass interne Detail-Infos (DB-Status, Disk-Space etc.) über `/actuator/health` sichtbar werden, falls der Endpoint doch erreichbar ist. |
-| `management.metrics.tags.application` | `hello-world` | Taggt alle Prometheus-Metriken mit dem App-Namen, damit sich die Metrikserien bei mehreren Deployments im selben Prometheus/Grafana sauber unterscheiden lassen. |
+| `build` | `registry.access.redhat.com/ubi10/openjdk-25:latest` | Maven-Build mit Spring AOT, Layer extrahieren, AOT-Cache trainieren |
+| Runtime | `registry.access.redhat.com/ubi10/openjdk-25-runtime:latest` | nur JRE, keine `RUN`-Befehle |
 
----
+Voraussetzung in der [pom.xml](service/pom.xml):
 
-## JVM-Flags (`JAVA_TOOL_OPTIONS` in `manifests/deployment.yaml`)
+```xml
+<properties>
+    <java.version>25</java.version>
+    <start-class>com.example.helloworld.HelloworldApplication</start-class>
+</properties>
+```
 
-| Flag | Begründung |
+### Build-Stage
+
+| Maßnahme | Begründung |
 |---|---|
-| ~~`-Djava.security.egd=file:/dev/./urandom`~~ **entfernt** | **ENTFERNT (2026-09-27).** Seit JDK 9 wirkungslos: `SecureRandom` nutzt unter Linux standardmäßig `NativePRNG` mit `/dev/urandom` und blockiert nicht mehr. Seit Kernel 5.6 blockiert außerdem auch `/dev/random` nach der Initialisierung nicht mehr. Der Workaround stammt aus der Java-8-Zeit. |
-| 🆕 `-XX:+UseCompactObjectHeaders` | **NEU (2026-09-27).** JEP 519, seit JDK 25 regulär verfügbar: Objekt-Header 8 statt 12 Byte. Weniger Heap-Verbrauch (typisch 10–20 % bei vielen kleinen Objekten) und bessere Cache-Lokalität. **Muss zum AOT-Cache-Trainingslauf im Dockerfile passen**, siehe [AOT Cache](#-aot-cache-jdk-25). |
-| ~~`-XX:NativeMemoryTracking=summary`~~ **entfernt** | **ENTFERNT (2026-11-08)** nach der Messung, siehe [Speicher messen](#-speicher-messen-native-memory-tracking). Für neue Messungen temporär per `--set javaOpts=...` ergänzen. |
-| 🆕 `-XX:AOTCache=/app/app.aot` | **NEU (2026-09-27).** Steht im ENTRYPOINT des Dockerfiles, nicht in `javaOpts`, weil der Pfad zum Image gehört. Siehe [AOT Cache](#-aot-cache-jdk-25). |
-| `-XX:+ExitOnOutOfMemoryError` | Lässt die JVM bei einem echten OOM sofort beenden, statt in einem undefinierten Zombie-Zustand weiterzulaufen. In Kubernetes ist das erwünscht: Der Container stirbt sauber, die Liveness-Probe schlägt fehl (oder der Exit passiert direkt) und Kubernetes startet den Pod neu. |
-| 🆕 `-Xms64m` / `-Xmx128m` | **NEU (2026-11-08)**, ersetzt `MaxRAMPercentage=70` / `InitialRAMPercentage=70`. Bei 512Mi-Limit waren das 358 MB Heap, voll committed, für ~30 MB Live-Daten. Fester Heap nach Messung (siehe [Speicher messen](#-speicher-messen-native-memory-tracking)). Bei mehr Live-Daten `-Xmx` und `limits.memory` gemeinsam erhöhen. |
-| 🆕 `-Xss512k` | **NEU (2026-11-08).** Kleinere Stacks für die verbleibenden Plattform-Threads. Requests laufen auf Virtual Threads, deren Stacks wachsen dynamisch im Heap. |
-| `-XX:MaxMetaspaceSize=64m` | Deckelt Klassenmetadaten-Speicher (sonst unbegrenzt → Risiko für natives OOM außerhalb des Heaps). **2026-11-08:** 96m → 64m, belegt sind ~6 MB, weil die Klassen im AOT-Cache („Shared class space“) liegen. |
-| 🆕 `-XX:ReservedCodeCacheSize=48m` | **NEU (2026-11-08).** Deckelt den JIT-Code-Cache. Mit C1-only (`TieredStopAtLevel=1`) belegt: ~14 MB. Default wäre 240 MB reserviert. |
-| `-XX:MaxDirectMemorySize=32m` | Deckelt NIO-Direct-Buffers (von Tomcat genutzt), verhindert unbemerktes Off-Heap-Wachstum. |
-| `-XX:-UsePerfData` | Kein Schreiben von `/tmp/hsperfdata_*`; passt zu `readOnlyRootFilesystem: true` und spart I/O. |
-| `-XX:+UseSerialGC` | Siehe [GC-Guide](#garbage-collector-guide) unten. Bewusst gewählt, weil der Pod nur 1 CPU-Core hat. |
-| `-XX:ActiveProcessorCount=1` | Muss exakt zum CPU-`limit` im Deployment passen. Ohne explizite Angabe leitet die JVM die sichtbaren Cores teils aus `cpu.shares`/Node-Cores statt aus dem tatsächlichen `limit` ab und legt dann zu viele GC-/JIT-Compiler-Threads an, die unter dem CFS-Quota nur throtteln statt zu arbeiten. |
-| `-XX:TieredStopAtLevel=1` | Beschränkt den JIT auf den C1-Compiler (kein aufwendiges C2-Tiering). Reduziert Compiler-Threads, RAM- und CPU-Verbrauch und verkürzt die Zeit bis zur "warmen" Performance, auf Kosten von etwas Peak-Throughput bei sehr lange laufenden, rechenintensiven Prozessen. Für kleine, horizontal skalierte Services (viele kurzlebige Pods, kein Dauerlast-Batch-Job) meist die bessere Wahl. In Kombination mit `spring.aot.enabled=true` (AOT-Verarbeitung, siehe Dockerfile) besonders wirksam für schnellen Start. |
-| `-Dspring.aot.enabled=true` | Aktiviert zur Laufzeit die Nutzung der beim Build per `spring-boot:process-aot` generierten AOT-Metadaten (weniger Reflection/Proxy-Arbeit beim Start → schnellerer, ressourcenschonenderer Boot). |
+| `COPY pom.xml` → `mvn dependency:go-offline` → `COPY src` → Build | Der Dependency-Layer bleibt gecacht, solange sich die `pom.xml` nicht ändert. Eine Code-Änderung lädt keine Dependencies neu. Die Reihenfolge nicht umstellen. |
+| `--mount=type=cache,target=/home/default/.m2,uid=185` | Das UBI-Build-Image läuft als User 185 mit `HOME=/home/default`. Ein Mount auf `/root/.m2` würde nie benutzt. Ohne `uid=185` gehört der Mount root und Maven kann nicht schreiben. Mit Cache dauert `go-offline` nach einer `pom.xml`-Änderung ~2 s statt ~47 s. |
+| `USER root`, `mkdir /build /app && chown 185:0 ...`, `USER 185` | `WORKDIR` legt fehlende Verzeichnisse als root an, dann kann Maven nicht hineinschreiben. |
+| `compile spring-boot:process-aot package` | Spring AOT, siehe unten. `compile` muss vor `process-aot` laufen. |
+| `-Dmaven.test.skip=true` statt `-DskipTests` | `-DskipTests` kompiliert die Tests trotzdem, und zwar jedes Mal komplett neu, weil `process-aot` in `target/classes` schreibt. |
+| `JAVA_TOOL_OPTIONS="-XX:ActiveProcessorCount=${BUILD_CPUS}"` (Default 2) | BuildKit kennt kein `--cpus` pro `RUN`. So sieht die JVM nur 2 CPUs und legt entsprechend wenige GC- und JIT-Threads an. `MAVEN_OPTS` reicht nicht, weil `process-aot` eine eigene JVM forkt. |
+| javac-Optionen | Bringen nichts für die Laufzeit, javac optimiert praktisch nicht. Die Liste der geprüften Optionen steht als Kommentar im Dockerfile. |
 
----
+`docker build --no-cache` verwirft auch die Cache-Mounts, Maven lädt dann alles neu. Für normale
+Rebuilds und Messungen ohne `--no-cache` bauen.
 
-## 🆕 AOT Cache (JDK 25)
+### Spring AOT
 
-**NEU (2026-09-27).** Spring AOT (`process-aot`) und der JDK-AOT-Cache sind zwei verschiedene Dinge, die sich ergänzen:
+`spring-boot:process-aot` erzeugt beim Build Java-Code für die Bean-Definitionen. Zur Laufzeit
+(`-Dspring.aot.enabled=true`) entfallen Classpath-Scanning, das Auswerten der
+`@Conditional`-Annotationen und ein großer Teil der Reflection.
 
-- **Spring AOT** ersetzt Reflection und Bean-Definition-Parsing durch generierten Code.
-- **JDK-AOT-Cache** (JEP 483, 514, 515) speichert die beim Start geladenen und gelinkten Klassen (inkl. Methoden-Profilen) in einer Datei. Beim nächsten Start mappt die JVM diese direkt, statt sie erneut zu laden, zu verifizieren und zu linken.
+Der Haken: `process-aot` wertet die Bedingungen schon beim Build aus. Alles, was Beans an- oder
+abschaltet, muss deshalb in der eingebauten `application.properties` stehen. Siehe
+[Build-Zeit-Properties](#build-zeit-properties-application-properties).
 
-**Umsetzung:**
+### Thin-JAR und Layer
 
-1. `service/Dockerfile`: Extraktion **ohne** `--launcher`. Der Cache funktioniert nur mit `java -jar application.jar` und dem Classpath aus dem Jar-Manifest. Mit dem `JarLauncher` (Nested-Jar-Classloader) lassen sich die Anwendungs- und Library-Klassen nicht aus dem Cache laden.
-2. `service/Dockerfile`: Trainingslauf in der Runtime-Stage mit `-XX:AOTCacheOutput=app.aot -Dspring.context.exit=onRefresh`. `onRefresh` beendet die App direkt nach dem Context-Refresh, der Build braucht also kein Netzwerk und keine ConfigMap. Er läuft in der Runtime-Stage, weil der Cache nur mit exakt derselben JVM gültig ist.
-3. `service/Dockerfile` (ENTRYPOINT, Exec-Form): `java -XX:AOTCache=/app/app.aot ... -jar /app/app.jar`.
+```dockerfile
+java -Djarmode=tools -jar app.jar extract --layers --application-filename app.jar --destination extracted
+```
 
-**Gemessen** (lokal, `docker run --cpus=1 -m 512m`, je 3 Läufe):
+Ohne `--launcher` entsteht `application/app.jar` mit einem `Class-Path`-Manifest auf
+`lib/*.jar`. Gestartet wird mit `java -jar /app/app.jar`. Das ist die Voraussetzung für den
+AOT-Cache: Mit `--launcher` lädt der `JarLauncher` die Klassen über einen eigenen Classloader,
+und diese Klassen landen nie im Cache.
+
+Die Layer definiert [service/src/layers.xml](service/src/layers.xml) (in der `pom.xml`
+aktiviert). Das Dockerfile kopiert sie einzeln, seltenste Änderung zuerst. Bei einer
+Code-Änderung baut und überträgt Docker nur den letzten Layer.
+
+| Layer | Inhalt |
+|---|---|
+| `dependencies` | Release-Libraries (Spring, Tomcat, Jackson ...) |
+| `observability-dependencies` | Micrometer, Prometheus, HdrHistogram, LatencyUtils |
+| `spring-boot-loader` | bleibt ohne `--launcher` leer, der `COPY` bleibt trotzdem stehen |
+| `snapshot-dependencies` | `*-SNAPSHOT`-Libraries |
+| `application-resources` | `application*.properties`, `static/`, `templates/` |
+| `application` | `app.jar` mit App-Code und AOT-generierten Klassen |
+
+Einen neuen Layer in `layers.xml`, in der Trainings-Schleife und bei den `COPY`-Befehlen
+gleichzeitig eintragen.
+
+### JDK-AOT-Cache
+
+Spring AOT und der JDK-AOT-Cache sind zwei verschiedene Dinge und ergänzen sich:
+
+- **Spring AOT** ersetzt Reflection und das Auswerten der Bean-Definitionen durch generierten Code.
+- **JDK-AOT-Cache** (JEP 483, 514, 515, Nachfolger von AppCDS) speichert die beim Start
+  geladenen und gelinkten Klassen samt JIT-Profilen in einer Datei. Beim nächsten Start mappt
+  die JVM die Datei, statt die Klassen erneut zu laden, zu verifizieren und zu linken.
+
+Ablauf im Dockerfile:
+
+1. Die Layer nach `/app` zusammenführen, im selben Layout wie in der Runtime-Stage. `cp -a` und
+   `COPY` erhalten die mtime der JARs.
+2. Trainingslauf in der Build-Stage:
+   `java -XX:AOTCacheOutput=/app/app.aot -XX:+UseSerialGC -XX:+UseCompactObjectHeaders -Dspring.aot.enabled=true -Dspring.context.exit=onRefresh -jar /app/app.jar`.
+   `onRefresh` beendet die App direkt nach dem Context-Refresh. Der Build braucht dafür weder
+   Netzwerk noch ConfigMap.
+3. `app.aot` in die Runtime-Stage kopieren, Start mit `-XX:AOTCache=/app/app.aot`.
+
+Gemessen beim Umbau (Temurin, `docker run --cpus=1 -m 512m`, je 3 Läufe):
 
 | | Spring-Startzeit | Prozess bis „Started“ |
 |---|---|---|
 | ohne AOT-Cache | 1,73–1,85 s | 2,01–2,12 s |
 | mit AOT-Cache | 0,89–0,92 s | 1,06–1,22 s |
 
-Im kind-Cluster mit Istio-Sidecar: `Started HelloworldApplication in 0.899 seconds`. Der Cache ist ca. 55 MB groß.
+Mit dem heutigen Image (UBI, `docker run --cpus 1 -m 256m --read-only`, Flags wie im Chart,
+2026-11-08): 0,72–0,84 s, Prozess bis „Started“ 0,85–1,03 s.
 
-**Wichtig: Flags müssen übereinstimmen.** GC (`-XX:+UseSerialGC`) und `-XX:+UseCompactObjectHeaders` müssen im Trainingslauf und in `javaOpts` gleich sein. Sonst verwirft die JVM den Cache. Die App startet dann trotzdem, nur ohne Zeitgewinn, und im Log steht:
+Der Cache ist ca. 56 MiB groß, das Image wächst entsprechend.
+
+Damit die JVM den Cache benutzt, müssen drei Dinge passen:
+
+- **Classpath:** Pfade, Größen und mtimes der JARs müssen im Training und zur Laufzeit gleich sein.
+- **JVM-Build:** Build- und Runtime-Image brauchen exakt denselben JVM-Build (z. B. beide 25.0.5+8).
+  Nach Base-Image-Updates beide `:latest`-Tags neu ziehen.
+- **Flags:** GC (`-XX:+UseSerialGC`) und `-XX:+UseCompactObjectHeaders` müssen im Training, im
+  ENTRYPOINT und in `JAVA_TOOL_OPTIONS` gleich sein.
+
+Passt etwas nicht, startet die App trotzdem, nur ohne Zeitgewinn. Im Log steht dann z. B.:
 
 ```
 [warning][aot] Unable to use AOT cache.
 The AOT cache's UseCompactObjectHeaders setting (enabled) does not equal the current UseCompactObjectHeaders setting (disabled).
 ```
 
-Nach Änderungen an diesen Flags im Chart also immer auch das Dockerfile anpassen und nach dem Deploy im Log auf `[aot]`-Warnungen prüfen. Die Warnungen `Skipping ...: Unlinked class not supported` beim **Build** sind normal (einzelne Klassen, die beim Training nicht vollständig gelinkt wurden).
+Nach Änderungen an diesen Flags also nach dem Deploy im Log nach `[aot]`-Warnungen suchen. Die
+Meldungen `Skipping ...: Unlinked class not supported` beim **Build** sind normal.
 
-**Hinweis:** `-XX:+UseCompactObjectHeaders` ist auch in `manifests/deployment.yaml` gesetzt, der Cache wird dort also ebenfalls genutzt.
+Prüfen, ob der Cache greift:
+
+```bash
+docker run --rm --entrypoint java wlanboy/helloworld:latest \
+  -XX:AOTCache=/app/app.aot -XX:+UseSerialGC -XX:+UseCompactObjectHeaders -Xlog:aot=info -version \
+  | grep "Opened AOT cache"
+
+# Anteil der Klassen aus dem Cache
+docker run --rm -e JAVA_TOOL_OPTIONS="-Xlog:class+load=info:file=/tmp/cl.txt -Dspring.context.exit=onRefresh" \
+  --entrypoint sh wlanboy/helloworld:latest -c \
+  'java -XX:AOTCache=/app/app.aot -Dspring.aot.enabled=true -XX:+UseSerialGC -XX:+UseCompactObjectHeaders -jar /app/app.jar >/dev/null; \
+   echo "$(grep -c "shared objects file" /tmp/cl.txt) von $(wc -l < /tmp/cl.txt)"'
+```
+
+Mit `spring.context.exit=onRefresh` kommen 7505 von 7689 Klassen (98 %) aus dem Cache. Ohne das
+Flag zählen auch die Klassen mit, die erst der erste Request lädt, dann sinkt der Anteil
+(gemessen 7511 von 8749). Ein Cache unter 1 MB ist leer.
+
+Zwei Einschränkungen:
+
+- Mit `TieredStopAtLevel=1` (nur C1) nützen die JIT-Profile im Cache wenig. Der Gewinn kommt
+  dann aus Klassenladen und Linking.
+- Nicht mit ZGC unter JDK 25: Der Cache archiviert dann keine Heap-Objekte (erst ab JDK 26,
+  JEP 516), es fehlen Lambdas, Proxies und der Modul-Graph.
+
+### Runtime-Stage
+
+| Maßnahme | Begründung |
+|---|---|
+| `USER 185`, `COPY --chown=185:185` | UBI-Standarduser, kein root. In Kubernetes passend `runAsUser: 185`, `fsGroup: 185`. Der Prozess läuft mit GID 0 (`uid=185 gid=0 groups=0,185`). |
+| keine `RUN`-Befehle | Das Image enthält nur, was die Build-Stage liefert. |
+| `EXPOSE 8080 8081` | App und Actuator (`management.server.port`). |
+| ENTRYPOINT in Exec-Form, kein Startskript | `java` ist PID 1 und bekommt SIGTERM direkt. Das braucht Graceful Shutdown. |
+| OCI-Labels | `version` synchron zur `pom.xml` halten. |
+
+**Welche Flags wohin.** Der ENTRYPOINT enthält nur die Flags, die zum Image gehören: Cache-Pfad,
+`spring.aot.enabled`, GC- und Header-Flags passend zum Training sowie `ExitOnOutOfMemoryError`.
+Damit nutzt auch ein nacktes `docker run` den Cache. Heap, Metaspace, CPU-Anzahl usw. kommen aus
+`JAVA_TOOL_OPTIONS` (Helm-Value `javaOpts`), weil sie zu den Resources des Pods passen müssen.
+
+Die GC- und Header-Flags stehen zusätzlich auch in `JAVA_TOOL_OPTIONS`, damit `check.py`,
+`check.sh` und jeder Leser des Deployments sie sehen. Die JVM wertet `JAVA_TOOL_OPTIONS` vor der
+Kommandozeile aus, bei gleichen Flags gewinnt also der ENTRYPOINT. Wer auf einen anderen GC
+wechseln will, muss das Dockerfile ändern (Training und ENTRYPOINT). Steht in `javaOpts`
+`-XX:+UseG1GC` und im ENTRYPOINT `-XX:+UseSerialGC`, startet die JVM nicht
+(`Multiple garbage collectors selected`).
 
 ---
 
-## 🆕 Speicher messen (Native Memory Tracking)
+## Minimaler Tomcat
 
-**NEU (2026-09-27).** Mit `-XX:NativeMemoryTracking=summary` in `javaOpts` lässt sich der Speicher der JVM im laufenden Pod aufschlüsseln. Das Runtime-Image ist ein JRE ohne `jcmd`, deshalb wird ein JDK-Container als Ephemeral Container an den Pod gehängt.
+Tomcat bleibt bewusst (kein Jetty). `spring-boot-starter-webmvc` zieht über
+`spring-boot-starter-tomcat-runtime` neben `tomcat-embed-core` auch `tomcat-embed-websocket` und
+`tomcat-embed-el` mit. Beide sind in der [pom.xml](service/pom.xml) ausgeschlossen:
 
-Der Debug-Container muss mit **derselben UID und GID** (185:0, UBI-Default) laufen wie die JVM, sonst verweigert der Kernel den Zugriff auf `/proc/1/root/tmp` (Attach-Socket). `kubectl debug --profile=restricted` allein setzt nur die UID, die GID bleibt 0. Daher die `--custom`-Datei:
+- **WebSocket**: Spring Boot konfiguriert WebSocket nur `@ConditionalOnClass`, ohne das JAR
+  passiert nichts. Wieder aufnehmen, sobald der Service WebSockets nutzt.
+- **EL** (Expression Language): braucht nur JSP und Bean Validation (Hibernate Validator
+  formatiert damit Fehlermeldungen). **Wieder aufnehmen, sobald `spring-boot-starter-validation`
+  dazukommt.**
+
+Prüfen:
+
+```bash
+cd service && ./mvnw dependency:tree -Dincludes=org.apache.tomcat.embed:*
+```
+
+Der Gewinn liegt bei einigen MB und etwas weniger Klassen beim Start.
+
+---
+
+## Build-Zeit-Properties (`application.properties`)
+
+Diese Properties stehen in [service/src/main/resources/application.properties](service/src/main/resources/application.properties),
+nicht in der ConfigMap. `spring-boot:process-aot` wertet die zugehörigen `@Conditional`-Annotationen
+beim Build aus und schreibt das Ergebnis als Bean-Definition fest. Zur Laufzeit gesetzt wären sie
+wirkungslos.
+
+| Property | Wert | Begründung |
+|---|---|---|
+| `management.server.port` | `8081` | Actuator auf eigenem Port. Kommt der Wert erst zur Laufzeit, läuft Actuator still auf `server.port` (8080). Die ConfigMap wiederholt den Wert nur zur Dokumentation. |
+| `management.endpoints.web.exposure.include` | `health,info,prometheus` | Nur die Endpunkte, die Probes und Prometheus brauchen. |
+| `spring.threads.virtual.enabled` | `true` | Jeder Request läuft auf einem eigenen Virtual Thread statt auf einem Thread aus dem Tomcat-Worker-Pool. Blockierendes I/O belegt dann keinen Plattform-Thread. Das Pinning-Problem bei `synchronized` ist seit JDK 24 behoben (JEP 491). |
+
+Werte, die nur in eine Bean injiziert werden (Timeouts, Größen, URLs), dürfen weiter aus der
+ConfigMap kommen. Darum steht der Rest unten.
+
+---
+
+## Server-/Tomcat-Konfiguration (ConfigMap)
+
+[manifests/configmap.yaml](manifests/configmap.yaml) bzw. `config` in den Helm-Values. Die Datei
+wird nach `/config/` gemountet und über `SPRING_CONFIG_ADDITIONAL_LOCATION=optional:file:/config/`
+geladen. `additional-location` ergänzt die eingebaute `application.properties`, statt sie zu
+ersetzen (anders als `spring.config.location`).
+
+| Property | Wert | Begründung |
+|---|---|---|
+| `server.shutdown` | `graceful` | Tomcat nimmt keine neuen Requests mehr an und lässt laufende zu Ende laufen. Nötig, damit Rolling Updates ohne 5xx ablaufen. Das Zeitfenster begrenzt `spring.lifecycle.timeout-per-shutdown-phase`. |
+| `spring.lifecycle.timeout-per-shutdown-phase` | `30s` | Muss **kleiner** sein als `terminationGracePeriodSeconds` (40 s inkl. 5 s `preStop`), sonst beendet Kubernetes den Prozess per SIGKILL mitten im Graceful Shutdown. |
+| `server.http2.enabled` | `true` | Erlaubt h2c (HTTP/2 ohne TLS) für Clients, die direkt auf den Pod gehen. Hinter Istio hat es keine Wirkung: Der Service-Port heißt `http`, Envoy spricht deshalb HTTP/1.1 zur App. Für HTTP/2 zwischen Envoy und App müsste der Port `http2` heißen oder `appProtocol: h2c` haben. |
+| `server.tomcat.max-connections` | `512` (Default 8192) | Mit Virtual Threads die eigentliche Grenze für gleichzeitige Requests. 8192 offene Verbindungen sind für einen 1-Core-Pod mit 320Mi hinter Istio (Envoy poolt selbst Verbindungen) viel zu viel und nur OOM-Risiko. |
+| `server.tomcat.accept-count` | `100` | Warteschlange im Kernel, wenn `max-connections` erreicht ist. Kurze Lastspitzen warten, statt abgelehnt zu werden. |
+| `server.tomcat.processor-cache` | `200` (= Default) | Zahl der `Processor`-Objekte, die Tomcat zur Wiederverwendung behält. Laufen mehr als 200 Requests gleichzeitig (möglich bis `max-connections`=512), erzeugt Tomcat die zusätzlichen neu und wirft sie danach weg. Bei dieser App kommt das kaum vor. Wer dauerhaft mehr parallele Requests erwartet, setzt den Wert auf `max-connections`. |
+| `server.tomcat.connection-timeout` | `5s` (Default 20s) | Wie lange Tomcat nach dem Verbindungsaufbau auf die Request-Zeile wartet. Kurz, damit halb offene Verbindungen den Shutdown nicht verzögern. |
+| `server.tomcat.keep-alive-timeout` | `15s` | Inaktive Keep-Alive-Verbindungen schließt Tomcat nach 15 s. Hält die Zahl offener Sockets unter `max-connections` klein. |
+| `server.tomcat.max-keep-alive-requests` | `50` (Default 100) | Nach 50 Requests schließt Tomcat die Verbindung, der Client baut sie neu auf. So bleibt eine lang gehaltene Verbindung nicht dauerhaft an einem Pod hängen, und neue Pods bekommen nach einem Scale-up schneller Traffic. |
+| `server.forward-headers-strategy` | `framework` | Envoy terminiert TLS und proxyt. Spring wertet die `X-Forwarded-*`-Header aus, damit Client-IP, Schema und Host in Logs und generierten URLs stimmen. |
+| `server.tomcat.mbeanregistry.enabled` | `false` | Keine JMX-Registrierung der Tomcat-MBeans. Metriken laufen über Actuator/Prometheus. |
+| `management.endpoint.health.probes.enabled` u. a. | `true` | Aktiviert `/actuator/health/liveness` und `/actuator/health/readiness` für die Probes. |
+| `management.endpoint.health.show-details` | `never` (= Default) | Explizit gesetzt, damit keine internen Details (DB-Status, Disk-Space) sichtbar werden, falls der Endpoint doch erreichbar ist. |
+| `management.metrics.tags.application` | `hello-world` | Taggt alle Metriken mit dem App-Namen, damit sich mehrere Deployments in Prometheus/Grafana unterscheiden lassen. |
+
+`server.tomcat.threads.max` und `threads.min-spare` fehlen absichtlich. Mit Virtual Threads
+nutzt Tomcat keinen Worker-Pool, beide Werte wären wirkungslos.
+
+---
+
+## JVM-Flags (`JAVA_TOOL_OPTIONS`)
+
+Gesetzt in `javaOpts` (Helm) bzw. `JAVA_TOOL_OPTIONS` in [manifests/deployment.yaml](manifests/deployment.yaml).
+
+| Flag | Begründung |
+|---|---|
+| `-Xms64m` / `-Xmx128m` | Fester Heap nach Messung: ~30 MB belegt nach 170k Requests. `MaxRAMPercentage`/`InitialRAMPercentage` dimensionieren nach dem Container-Limit (bei 512Mi und 70 % waren das 358 MB für ~30 MB Live-Daten), ohne Limit sogar nach dem Host-RAM. Bei mehr Live-Daten `-Xmx` und `limits.memory` gemeinsam erhöhen. |
+| `-Xss512k` | Kleinere Stacks für die verbliebenen Plattform-Threads. Virtual Threads haben dynamische Stacks im Heap, für sie gilt das Flag nicht. |
+| `-XX:MaxMetaspaceSize=64m` | Deckelt die Klassenmetadaten. Belegt sind ~6 MB, weil die Klassen im AOT-Cache („Shared class space“) liegen. Ohne Cache wären eher 128m nötig. |
+| `-XX:ReservedCodeCacheSize=48m` | Deckelt den JIT-Code-Cache. Mit C1-only belegt ~14 MB, Default wären 240 MB reserviert. |
+| `-XX:MaxDirectMemorySize=32m` | Deckelt NIO-Direct-Buffers, damit Off-Heap-Speicher nicht unbemerkt wächst. Ohne Angabe gilt `-Xmx` als Grenze. |
+| `-XX:+UseSerialGC` | Kleinster Footprint bei kleinem Heap, siehe [GC-Guide](#garbage-collector-guide). Muss zum AOT-Cache passen. |
+| `-XX:+UseCompactObjectHeaders` | JEP 519, ab JDK 25 Produkt-Flag. Objekt-Header 8 statt 12 Byte, typisch 10–20 % weniger Heap bei vielen kleinen Objekten. Muss zum AOT-Cache passen. |
+| `-XX:ActiveProcessorCount=1` | Gleich dem CPU-Limit. Ohne Angabe leitet die JVM die CPU-Zahl je nach Version und cgroup-Setup aus der Quota oder den Node-Cores ab und legt dann zu viele GC-, JIT-, ForkJoin- und Carrier-Threads an, die unter der CFS-Quota nur gedrosselt werden. |
+| `-XX:TieredStopAtLevel=1` | Nur der C1-Compiler, kein C2. Weniger Compiler-Threads, weniger CPU und Speicher. Auf 1 CPU spart das beim Start ~0,45 s, weil keine C2-Compiler-Threads mit dem Start um den Core konkurrieren (gemessen 0,73–0,80 s statt 1,2–1,3 s). Kostet Spitzendurchsatz bei CPU-lastiger Logik. Für einen I/O-gebundenen Service mit vielen kleinen Pods die bessere Wahl. |
+| `-XX:+ExitOnOutOfMemoryError` | Bei einem OOM beendet sich die JVM sofort, statt in undefiniertem Zustand weiterzulaufen. Kubernetes startet den Container neu. |
+| `-XX:-UsePerfData` | Kein `/tmp/hsperfdata_*`. Passt zu `readOnlyRootFilesystem`, `jcmd 1` funktioniert trotzdem. |
+| `-Dspring.aot.enabled=true` | Nutzt zur Laufzeit den beim Build erzeugten AOT-Code. Ohne das Flag ignoriert Spring ihn. |
+
+Der Cache-Pfad `-XX:AOTCache=/app/app.aot` steht nur im ENTRYPOINT, weil er zum Image gehört.
+
+Für eine Messung `-XX:NativeMemoryTracking=summary` temporär ergänzen (siehe
+[Speicher messen](#speicher-messen)). Nicht mehr verwendet werden
+`-Djava.security.egd=file:/dev/./urandom` (seit JDK 9 wirkungslos, `SecureRandom` blockiert unter
+Linux nicht) und G1-Optionen wie `MaxGCPauseMillis`.
+
+---
+
+## Garbage-Collector-Guide
+
+| GC | Funktionsweise | Pausen | Overhead | Geeignet für |
+|---|---|---|---|---|
+| **Serial** (`-XX:+UseSerialGC`) | ein Thread, Stop-the-World | bei < 200 MB Heap einstellige ms | minimal, keine GC-Threads | 1 (v)CPU, kleine Heaps, viele kleine Pods |
+| **Parallel** (`-XX:+UseParallelGC`) | mehrere Threads, Stop-the-World | länger, aber seltener | mittel, skaliert mit Cores | Batch-Jobs mit ≥ 2 Cores, Pausen egal |
+| **G1** (`-XX:+UseG1GC`) | regionenbasiert, teils nebenläufig | Ziel per `MaxGCPauseMillis`, meist 10–100 ms | höher (Remembered Sets, mehr Threads) | normale Services mit ≥ 2 Cores und mehreren GB Heap |
+| **ZGC** (`-XX:+UseZGC`) | fast vollständig nebenläufig | < 1–10 ms, unabhängig von der Heap-Größe | deutlich mehr RAM und CPU | latenzkritisch, große Heaps (≥ 4–8 GB), genug CPU-Reserve |
+| **Shenandoah** (`-XX:+UseShenandoahGC`) | ähnlich ZGC | < 10 ms | ähnlich ZGC, etwas weniger RAM | latenzkritisch, wenn ZGC nicht passt |
+
+Ohne explizite Angabe wählt die JVM G1, wenn sie mindestens 2 CPUs und 1792 MB RAM sieht,
+sonst Serial. Das hängt vom Container ab, deshalb den GC immer explizit setzen. Beim AOT-Cache
+ist das ohnehin Pflicht.
+
+**Entscheidung für dieses Repo.** 1 CPU und 128 MB Heap: Serial GC. Parallele oder nebenläufige
+Collectors legen mehrere Threads an, die sich unter der CFS-Quota gegenseitig drosseln. Im
+MirrorService-Projekt lag der RSS mit G1 bei ~210 MiB, mit ZGC am OOM-Limit von 256 MiB.
+
+**Wann wechseln.** Bekommt der Service ≥ 2 Cores und mehrere GB Heap, auf G1 wechseln, bei harten
+Latenzanforderungen ZGC prüfen. Dafür müssen Dockerfile (Training und ENTRYPOINT), `javaOpts`,
+`ActiveProcessorCount` und das CPU-Limit gemeinsam angepasst werden. ZGC unter JDK 25 verliert
+einen Teil des AOT-Cache-Effekts (siehe oben).
+
+---
+
+## Resource-Limits
+
+| Setting | Wert | Begründung |
+|---|---|---|
+| `limits.cpu` | `1` | Gleich `ActiveProcessorCount=1`. Serial GC kann den einen Core voll nutzen. |
+| `requests.cpu` | `100m` | Im Leerlauf nahe 0. Erlaubt dichtes Packen der Pods auf den Nodes. Start und Lastspitzen bursten bis zum Limit. |
+| `limits.memory` | `320Mi` | Rechnung siehe unten. |
+| `requests.memory` | `160Mi` | Gemessener RSS unter Last (111–127 MiB) plus Puffer. |
+| `ephemeral-storage` | `128Mi` / `256Mi` | Logs und `/tmp`. Das Limit deckelt Ausreißer wie Heap-Dumps. |
+
+Rechnung für `limits.memory`, mit den gemessenen Werten (Docker, `-m 384m`, 170k Requests):
+
+| Bereich | Obergrenze | gemessen (NMT committed) |
+|---|---|---|
+| Heap | 128 MB (`-Xmx`) | 64 MB (`-Xms`), davon ~30 MB belegt |
+| AOT-Cache | 56 MiB (Dateigröße) | 52 MB |
+| Code-Cache | 48 MB (`ReservedCodeCacheSize`) | 14 MB |
+| Metaspace | 64 MB (`MaxMetaspaceSize`) | 6 MB |
+| Direct Memory | 32 MB (`MaxDirectMemorySize`) | gering |
+| Threads, GC, Sonstiges | ~20 MB | ~10 MB |
+| **Summe** | **~350 MB** | **146 MB** |
+
+Die Summe aller Obergrenzen liegt über 320Mi. Realistisch ist aber nur der Heap ganz ausgereizt,
+Metaspace und Code-Cache bleiben weit unter ihren Deckeln. Mit vollem Heap und den gemessenen
+Off-Heap-Werten landet man bei ~260 MB, das lässt ~60 MiB Puffer. `-Xmx` und `limits.memory`
+deshalb immer gemeinsam ändern.
+
+---
+
+## Speicher messen
+
+Das Runtime-Image ist ein JRE ohne `jcmd`. Für eine Messung im Pod
+`-XX:NativeMemoryTracking=summary` per `--set javaOpts=...` ergänzen (1–2 % Overhead) und einen
+JDK-Container als Ephemeral Container anhängen.
+
+Der Debug-Container muss mit **derselben UID und GID** (185:0) laufen wie die JVM, sonst
+verweigert der Kernel den Zugriff auf den Attach-Socket unter `/proc/1/root/tmp`.
+`kubectl debug --profile=restricted` setzt nur die UID, deshalb die `--custom`-Datei:
 
 ```bash
 cat > nmt-debug.json <<'EOF'
@@ -129,155 +423,68 @@ kubectl debug -n <namespace> $POD --image=registry.access.redhat.com/ubi10/openj
 kubectl exec -n <namespace> $POD -c nmt -- jcmd 1 VM.native_memory summary scale=MB
 kubectl exec -n <namespace> $POD -c nmt -- jcmd 1 GC.heap_info
 
-# Tatsaechlicher Container-Verbrauch (das, was das Memory-Limit/OOMKill sieht)
+# Tatsächlicher Container-Verbrauch (das, was das Memory-Limit und der OOM-Killer sehen)
 kubectl exec -n <namespace> $POD -c hello-world -- cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.peak
 ```
 
-Die JDK-Version des Debug-Images muss zur JVM passen (25). `-XX:-UsePerfData` stört nicht, `jcmd <pid>` funktioniert auch ohne `hsperfdata`.
+Die JDK-Version des Debug-Images muss zur JVM passen (25).
 
-**Erste Messung** (kind-Cluster, Istio-Sidecar, nach 20 s Last mit ~3400 req/s):
+NMT „committed“ ist nicht der reale Verbrauch: Linux belegt Speicherseiten erst beim ersten
+Schreiben. Für Requests und Limits zählt `memory.peak`. Bei der ersten Messung mit
+`InitialRAMPercentage=70` zeigte NMT 440 MB committed, real belegt waren ~200 MiB.
 
-| Bereich (NMT) | committed |
-|---|---|
-| Java Heap | 360 MB (voll committed wegen `InitialRAMPercentage=70`) |
-| Shared class space (AOT-Cache) | 51 MB |
-| Code | 13 MB |
-| Metaspace | 6 MB |
-| Symbol, Thread, GC, Internal, NMT, Class | je 1–2 MB |
-| **Total** | **440 MB** |
-
-| Messgröße | Wert |
-|---|---|
-| Heap tatsächlich belegt (`GC.heap_info`) | ~26 MB (Eden 12 MB, Tenured 13 MB von 240 MB) |
-| cgroup `memory.current` / `memory.peak` | 200 MiB / 202 MiB |
-| Threads | 26 |
-
-**Interpretation:**
-
-- NMT „committed“ ist nicht gleich realer Verbrauch: Linux belegt Speicherseiten erst beim ersten Schreiben. Vom Tenured-Bereich wurden bisher nur ~5 % berührt, daher ~200 MiB real statt 440 MB.
-- **Worst Case** (Tenured läuft einmal voll, bevor ein Full GC aufräumt): ~440 MB plus malloc außerhalb von NMT. Das liegt unter `limits.memory: 512Mi`, der Puffer beträgt aber nur ~70 MiB.
-- `requests.memory: 256Mi` passt zum gemessenen Ruhezustand (~200 MiB), der Worst Case liegt jedoch deutlich darüber. Bei knappem Node-Speicher kann der Pod daher zuerst evicted werden.
-- Die Live-Daten der Hello-World-App (~26 MB) sind im Vergleich zum 360-MB-Heap sehr klein. Für einen echten Service mit mehr Live-Daten gilt das nicht, deshalb hier noch keine Änderung an `resources`/`MaxRAMPercentage`. Erst mit realistischer Last messen und dann anpassen.
-
-**Zweite Messung (2026-11-08)** mit festem Heap `-Xms64m -Xmx128m`, Tomcat ohne WebSocket/EL:
-
-| Messgröße | Docker (`-m 384m --cpus 1`, 170k Requests) | kind (`chart/`, 130k Requests, ~4300 req/s) |
-|---|---|---|
-| NMT committed gesamt | 146 MB (Heap 64, AOT-Cache 52, Code 14, Metaspace 6) | |
-| Heap belegt | ~30 MB (Tenured 16 MB) | |
-| RSS / `memory.peak` | 119 MiB | 111–127 MiB |
-| Startzeit | 0,77 s | 0,79 s |
-
-Daraus: `requests.memory: 160Mi`, `limits.memory: 320Mi` (Heap 128 + AOT-Cache 64 + Code-Cache 48 + Metaspace + Direct 32 + Threads/GC), `requests.cpu: 100m`.
-
----
-
-## Garbage-Collector-Guide
-
-### Übersicht
-
-| GC | Funktionsweise | Pause-Ziel | Typischer Speicher-/CPU-Overhead | Geeignet für |
-|---|---|---|---|---|
-| **Serial GC** (`-XX:+UseSerialGC`) | Ein einziger Thread für Minor+Major GC, Stop-the-World | Kurze Pausen bei **kleinem** Heap, keine Parallelität nötig | Minimal, kein zusätzlicher GC-Thread-Pool | Container mit **1 (v)CPU**, kleine Heaps (< ~1–2 GB), viele kurzlebige/horizontal skalierte Pods |
-| **Parallel GC** (`-XX:+UseParallelGC`) | Mehrere Threads für Minor+Major GC, Stop-the-World | Höhere, aber seltenere Pausen | Mittel, skaliert mit Core-Zahl | Batch-/Durchsatz-orientierte Jobs mit ≥2 Cores, Pausenzeiten irrelevant |
-| **G1 GC** (`-XX:+UseG1GC`, **Default seit JDK 9** bei ≥2 Cores & ≥2 GB Heap) | Region-basiert, überwiegend parallel, teils konkurrent | Ziel: einstellbare Pausenzeit (`-XX:MaxGCPauseMillis`), i. d. R. wenige 10–100ms | Höher als Serial/Parallel (Remembered Sets, mehr GC-Threads) | "Normale" Services mit ≥2 Cores und mehreren GB Heap, guter Allround-Default |
-| **ZGC** (`-XX:+UseZGC`) | Region-basiert, fast vollständig konkurrent | < 1–10ms, praktisch heap-größenunabhängig | Deutlich mehr RAM/CPU-Grundlast (Colored Pointers/Load Barriers, mehr Concurrent-Threads); in kleinen/eng limitierten Containern oft instabil (OOM statt G1) | Latenzkritische Services mit **großen Heaps (≥4–8 GB)** und genug CPU-Headroom für Concurrent-Threads |
-| **Shenandoah** (`-XX:+UseShenandoahGC`) | Ähnlich ZGC, konkurrentes Compaction | < 10ms, weitgehend heap-größenunabhängig | Ähnlich ZGC, tendenziell etwas weniger RAM-Overhead als ZGC | Latenzkritische Services, bei denen ZGC nicht verfügbar ist oder feineres Tuning gewünscht ist |
-
-### Entscheidungsgrundlage
-
-1. **Wie viele CPU-Cores stehen dem Container zur Verfügung?**
-   - **1 Core / stark CPU-throttled** (typisch: kleine Microservices hinter Istio, `cpu.limit ≤ 1`) → **Serial GC**. Parallele/konkurrente Collectors legen mehrere GC-Threads an, die sich unter dem CFS-Quota gegenseitig throtteln und in Summe *mehr* Overhead erzeugen als der einfache, einthreadige Serial-Collector. Das ist der Grund, warum dieses Deployment `-XX:+UseSerialGC` + `-XX:ActiveProcessorCount=1` kombiniert.
-   - **≥2 Cores** → G1 (Default) ist i. d. R. die richtige Wahl, ohne dass man überhaupt etwas explizit setzen muss.
-
-2. **Wie groß ist der Heap?**
-   - Kleiner Heap (Hello-World-/CRUD-Service, wenige hundert MB) → Serial oder G1 reichen; ZGC/Shenandoah lohnen den Overhead nicht.
-   - Großer Heap (mehrere GB, z. B. Caching-/Aggregations-Services) → G1 als Standard, ZGC/Shenandoah wenn Pausenzeiten trotzdem spürbar/kritisch sind.
-
-3. **Ist Latenz oder Durchsatz wichtiger?**
-   - Durchsatz/Batch, Pausen egal → Parallel GC.
-   - Ausgewogen, Standardfall → G1.
-   - Harte Low-Latency-Anforderung (z. B. < 10ms p99 GC-Pause) UND genug RAM/CPU-Puffer für den Concurrent-Overhead → ZGC oder Shenandoah.
-
-4. **Faustregel für dieses Repo:** Solange der Pod auf 1 Core / ≤512Mi limitiert bleibt, **Serial GC beibehalten**. Wird der Service später auf ≥2 Cores und mehrere GB Heap skaliert (z. B. weil er nicht mehr nur "Hello World" macht), `-XX:+UseSerialGC` entfernen und auf G1-Default wechseln bzw. bei Bedarf ZGC evaluieren. Dann auch `-XX:ActiveProcessorCount` und `server.tomcat.threads.max` entsprechend mit hochziehen.
-
----
-
-## Resource-Limits (`manifests/deployment.yaml`)
-
-| Setting | Wert | Begründung |
-|---|---|---|
-| `resources.limits.cpu` | `1` | Deckt sich mit `-XX:ActiveProcessorCount=1` und der Wahl von Serial GC. Ein einzelner GC-Thread kann den einen verfügbaren Core voll nutzen, ohne dass CFS-Throttling zwischen mehreren GC-Threads hin- und herschaltet. |
-| `resources.requests.cpu` | `100m` (bis 2026-11-08: `250m`) | Im Leerlauf nahe 0. Erlaubt Kubernetes ein engeres Bin-Packing im Node, während Burst bis zum Limit (1 Core) für Lastspitzen/Start (AOT-Klassenladen, JIT) möglich bleibt. |
-| `resources.limits.memory` | `320Mi` (bis 2026-11-08: `512Mi`) | Heap `-Xmx128m` + AOT-Cache (~64 MB) + Code-Cache (`48m`) + Metaspace (belegt ~6 MB, Deckel `64m`) + Direct-Memory (`32m`) + Thread-Stacks/GC. Gemessener Peak: 127 MiB. |
-| `resources.requests.memory` | `160Mi` (bis 2026-11-08: `256Mi`) | Gemessener RSS unter Last (111–127 MiB) plus Puffer. |
-
-**Wichtig:** `-Xmx` und `limits.memory` immer gemeinsam ändern. Der Speicher außerhalb des Heaps (AOT-Cache, Code-Cache, Metaspace, Direct-Memory, Threads) liegt hier bei ~150–190 MB.
+[check.py](check.py) und [manifests/check.sh](manifests/check.sh) lesen CPU, Speicher,
+effektive JVM-Flags und Startzeit eines laufenden Pods aus.
 
 ---
 
 ## Graceful Shutdown & Istio
 
-- `server.shutdown=graceful` + `spring.lifecycle.timeout-per-shutdown-phase=30s` sorgen dafür, dass Tomcat laufende Requests zu Ende bearbeitet, statt sie hart zu kappen.
-- `terminationGracePeriodSeconds: 40` im Deployment gibt der Anwendung mehr Zeit als die 30s Spring-internes Timeout, damit Kubernetes nicht per SIGKILL dazwischenfunkt.
-- Der `preStop`-Hook (`sleep 5`) verzögert den eigentlichen Shutdown kurz, damit der Istio-Sidecar den Pod aus dem Envoy-Routing entfernen kann, bevor Tomcat aufhört, neue Verbindungen anzunehmen. Vermeidet vereinzelte 503er während Rolling Updates.
-- 🆕 **NEU (2026-09-27): native preStop-Sleep-Action** in den Helm-Charts (`lifecycle.preStop.sleep.seconds`, GA seit Kubernetes 1.34) statt `exec: sh -c "sleep 5"`. Der Kubelet wartet selbst, dafür braucht das Image weder Shell noch `sleep`-Binary, und es entsteht kein zusätzlicher Prozess im Container. [update] Das Image (UBI 10) nutzt Exec-Form-ENTRYPOINT und `JAVA_TOOL_OPTIONS`, `entrypoint.sh` entfällt.
-- 🆕 **NEU (2026-09-27): Istio als nativer Sidecar** (Pod-Annotation `sidecar.istio.io/nativeSidecar: "true"`). Istio injiziert `istio-proxy` dann als initContainer mit `restartPolicy: Always`. Kubernetes startet ihn garantiert **vor** dem App-Container und beendet ihn erst **nach** ihm. Ohne das kann die App beim Start Requests senden, bevor Envoy bereit ist, und während preStop + Graceful Shutdown ist Envoy eventuell schon beendet, sodass ausgehende Requests fehlschlagen. Im kind-Cluster geprüft: `init: istio-proxy restartPolicy=Always`.
-- 🆕 **NEU (2026-09-27): `proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'`** als Fallback für Cluster/Istio-Versionen ohne native Sidecars. Mit nativem Sidecar ist das Verhalten ohnehin implizit, die Annotation schadet dann nicht.
+- `server.shutdown=graceful` und `spring.lifecycle.timeout-per-shutdown-phase=30s`: Tomcat
+  bearbeitet laufende Requests zu Ende, statt sie abzubrechen.
+- `terminationGracePeriodSeconds: 40` gibt der App mehr Zeit als die 30 s von Spring, damit
+  Kubernetes nicht vorher per SIGKILL beendet.
+- `preStop` wartet 5 s, bevor Kubernetes SIGTERM schickt. In der Zeit entfernt Istio den Pod
+  aus dem Envoy-Routing, und es kommen keine neuen Requests mehr an. Das vermeidet vereinzelte
+  503 bei Rolling Updates. Umgesetzt als native Sleep-Action (`lifecycle.preStop.sleep.seconds`,
+  GA seit Kubernetes 1.34): Der Kubelet wartet selbst, im Container läuft kein Prozess, und das
+  Image braucht keine Shell.
+- `sidecar.istio.io/nativeSidecar: "true"`: Istio injiziert `istio-proxy` als initContainer mit
+  `restartPolicy: Always`. Kubernetes startet ihn vor dem App-Container und beendet ihn erst
+  danach. Ohne das kann die App beim Start Requests senden, bevor Envoy bereit ist, und beim
+  Shutdown ist Envoy eventuell schon weg. Im kind-Cluster geprüft: `init: istio-proxy restartPolicy=Always`.
+- `proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'`: Fallback für
+  Istio-Versionen ohne native Sidecars. Mit nativem Sidecar schadet es nicht.
 
 ---
 
-## Verfügbarkeit & Sicherheit (`manifests/deployment.yaml`)
+## Verfügbarkeit & Sicherheit
 
 | Setting | Wert | Begründung |
 |---|---|---|
-| `spec.strategy` | `RollingUpdate`, `maxUnavailable: 0`, `maxSurge: 1` | Explizit statt Default (25 % auf/ab, rundet bei `replicas: 2` ungünstig). Während des Rollouts darf kein Pod fehlen, stattdessen läuft kurzzeitig ein dritter Pod zusätzlich. Garantiert Zero-Downtime-Deploys, statt sich auf Rundungsverhalten zu verlassen. |
-| `automountServiceAccountToken` | `false` | Die App braucht keinen Zugriff auf die Kubernetes-API. Kein Service-Account-Token im Pod reduziert die Angriffsfläche, weil es keinen Token gibt, der bei einem Container-Escape missbraucht werden könnte. Ergänzt die übrigen Security-Einstellungen (`runAsNonRoot`, `readOnlyRootFilesystem`, `capabilities.drop: ["ALL"]`, `seccompProfile`). |
-| `affinity.podAntiAffinity` | `preferredDuringSchedulingIgnoredDuringExecution`, `topologyKey: kubernetes.io/hostname` | Die `PodDisruptionBudget` (`minAvailable: 1`) schützt nur vor freiwilligem Draining, nicht vor einem Node-Ausfall. Anti-Affinity verteilt die beiden Replicas bevorzugt auf unterschiedliche Nodes. `preferred` statt `required`, damit das Scheduling auch bei wenigen verfügbaren Nodes (z. B. lokal/Test-Cluster) nicht blockiert. |
-| 🆕 `podDisruptionBudget.unhealthyPodEvictionPolicy` | `AlwaysAllow` | **NEU (2026-09-27).** GA seit Kubernetes 1.31. Pods, die nicht Ready sind (z. B. CrashLoopBackOff), dürfen immer evicted werden. Mit dem Default `IfHealthyBudget` zählt ein kaputter Pod gegen das Budget und blockiert jeden Node-Drain, obwohl er ohnehin keinen Traffic bedient. |
-| 🆕 `volumes[tmp].emptyDir.sizeLimit` | `64Mi` (`tmpSizeLimit`) | **NEU (2026-09-27).** `/tmp` ist wegen `readOnlyRootFilesystem` das einzige beschreibbare Verzeichnis (Tomcat-Work-Dir, JVM-Attach-Socket für `jcmd`). Ohne Limit könnte ein volllaufendes `/tmp` den Node-Speicher belasten. Mit Limit wird nur dieser Pod evicted. |
-| 🆕 Labels `app.kubernetes.io/*`, `helm.sh/chart` | `name`, `instance`, `version`, `managed-by`, `chart` | **NEU (2026-09-27).** Kubernetes-Standard-Labels für Tools (Dashboards, `kubectl`-Filter, Kiali). Istio nutzt `app.kubernetes.io/version` außerdem für `service.istio.io/canonical-revision`. **Nur in `labels`, nicht im Selector:** `spec.selector` eines Deployments ist unveränderlich, eine Änderung würde jedes `helm upgrade` bestehender Releases scheitern lassen. Der Selector bleibt deshalb bei `app`. |
+| `strategy` | `RollingUpdate`, `maxUnavailable: 0`, `maxSurge: 1` | Explizit statt Default (25 %, rundet bei 2 Replicas ungünstig). Während des Rollouts fehlt kein Pod, es läuft kurz ein dritter. |
+| `startupProbe` | 30 × 2 s auf `/actuator/health/readiness` | 60 s Startbudget, ohne dass die Liveness-Probe den Pod beim Start beendet. `timeoutSeconds: 5`, weil auf 1 Core eine GC-Pause den Actuator-Call über 1 s ziehen kann. |
+| Probes auf Port 8081 | `management` | Der Management-Port ist im Service nicht freigegeben, über Istio also nicht erreichbar, nur direkt an der Pod-IP. |
+| `automountServiceAccountToken` | `false` | Die App braucht die Kubernetes-API nicht. Ohne Token im Pod gibt es nach einem Container-Escape keinen Token zum Missbrauchen. |
+| `securityContext` | `runAsNonRoot`, `runAsUser: 185`, `readOnlyRootFilesystem`, `capabilities.drop: ["ALL"]`, `allowPrivilegeEscalation: false`, `seccompProfile: RuntimeDefault` | Grundhärtung. UID 185 passt zum UBI-Image. |
+| `/tmp` als `emptyDir` mit `sizeLimit: 64Mi` | | Wegen `readOnlyRootFilesystem` das einzige beschreibbare Verzeichnis (Tomcat-Work-Dir, Attach-Socket für `jcmd`). Läuft es voll, wird nur dieser Pod evicted. |
+| `podAntiAffinity` | `preferred`, `topologyKey: kubernetes.io/hostname` | Verteilt die Replicas auf verschiedene Nodes. Die PDB schützt nur vor geplantem Draining, nicht vor einem Node-Ausfall. `preferred`, damit Scheduling in kleinen Clustern nicht blockiert. |
+| PDB `minAvailable: 1` | | Bei Node-Drain bleibt immer ein Pod verfügbar. |
+| PDB `unhealthyPodEvictionPolicy` | `AlwaysAllow` | GA seit Kubernetes 1.31. Pods, die nicht Ready sind (z. B. CrashLoopBackOff), dürfen immer evicted werden. Mit dem Default blockiert ein kaputter Pod jeden Node-Drain. |
+| Labels `app.kubernetes.io/*`, `helm.sh/chart` | nur Helm-Charts | Standard-Labels für Tools und Istio (`canonical-revision`). Nur in `labels`, der Selector bleibt `app`, weil `spec.selector` unveränderlich ist und eine Änderung jedes `helm upgrade` scheitern ließe. |
 
 ---
 
-## 🆕 Änderungsprotokoll 2026-09-27: Review der Helm-Charts
+## Geprüft, aber bewusst nicht umgesetzt
 
-Gilt für `chart/` und `chart-hpa/` gleichermaßen. In `manifests/` ist bisher nur `-XX:+UseCompactObjectHeaders` nachgezogen.
-
-### Hinzugefügt
-
-| Änderung | Wo | Warum | Details |
-|---|---|---|---|
-| JDK-AOT-Cache | `service/Dockerfile` | Startzeit etwa halbiert (gemessen 0,9 s statt 1,8 s), wichtig für Scale-up und Scale-from-zero | [AOT Cache](#-aot-cache-jdk-25) |
-| `-XX:+UseCompactObjectHeaders` | `javaOpts`, `manifests/deployment.yaml`, Dockerfile-Training | weniger Heap | [JVM-Flags](#jvm-flags-java_opts-in-manifestsdeploymentyaml) |
-| `-XX:NativeMemoryTracking=summary` | `javaOpts` | `resources.memory` auf Messwerte statt Schätzung stützen (2026-11-08 nach der Messung wieder entfernt) | [Speicher messen](#-speicher-messen-native-memory-tracking) |
-| Virtual Threads | `application.properties` (Build-Zeit) | Blockierendes I/O belegt keine Plattform-Threads | [Server-/Tomcat-Konfiguration](#server-tomcat-konfiguration-manifestsconfigmapyaml) |
-| native preStop-Sleep | `deployment.yaml` | keine Shell für den Hook nötig | [Graceful Shutdown & Istio](#graceful-shutdown--istio) |
-| Istio nativer Sidecar + `holdApplicationUntilProxyStarts` | `podAnnotations` | korrekte Start-/Stop-Reihenfolge App ↔ Envoy | [Graceful Shutdown & Istio](#graceful-shutdown--istio) |
-| PDB `unhealthyPodEvictionPolicy: AlwaysAllow` | `poddisruptionbudget.yaml` | kaputte Pods blockieren keinen Node-Drain | [Verfügbarkeit & Sicherheit](#verfügbarkeit--sicherheit-manifestsdeploymentyaml) |
-| `emptyDir.sizeLimit` für `/tmp` | `deployment.yaml` | Node-Speicher schützen | [Verfügbarkeit & Sicherheit](#verfügbarkeit--sicherheit-manifestsdeploymentyaml) |
-| Standard-Labels | `_helpers.tpl` | Tooling/Istio, Selector unverändert | [Verfügbarkeit & Sicherheit](#verfügbarkeit--sicherheit-manifestsdeploymentyaml) |
-
-### Entfernt
-
-| Änderung | Warum |
+| Vorschlag | Warum nicht |
 |---|---|
-| `-Djava.security.egd=file:/dev/./urandom` | seit JDK 9 wirkungslos, `SecureRandom` blockiert unter Linux nicht mehr |
-| `server.tomcat.threads.max=20`, `server.tomcat.threads.min-spare=5` | mit Virtual Threads wirkungslos (kein Worker-Pool mehr) |
-| `--launcher` bei der Jar-Extraktion, `JarLauncher` im Entrypoint | verhindert, dass der AOT-Cache Anwendungs- und Library-Klassen lädt |
-
-### Geprüft, aber bewusst nicht umgesetzt
-
-| Vorschlag | Warum nicht (vorerst) |
-|---|---|
-| `requests.memory` = `limits.memory` | Nicht übernommen. **2026-11-08:** `MaxRAMPercentage` durch festen Heap ersetzt, Requests/Limits nach Messung gesenkt (siehe [Resource-Limits](#resource-limits-manifestsdeploymentyaml)). |
-| `-XX:TieredStopAtLevel=1` entfernen | Trade-off: schnellerer Start und weniger CPU gegen geringeren Spitzendurchsatz (kein C2). Beibehalten, bis Lasttests zeigen, dass der Durchsatz pro Pod der Engpass ist. Hinweis: Die Methoden-Profile im AOT-Cache (JEP 515) nützen vor allem C2, mit C1-only bringt der Cache vor allem Klassenladen/Linking. |
-| `enableServiceLinks: false` | Nicht übernommen. Nur geringer Nutzen (weniger Umgebungsvariablen bei vielen Services im Namespace). |
-| Probes auf dem Hauptport (`management.endpoint.health.probes.add-additional-paths=true`) | Nicht übernommen. Probes bleiben auf dem separaten Management-Port 8081. Einschränkung: Hängt nur der Haupt-Connector (8080), bemerkt die Probe das nicht. |
-| Image-Tag fest statt `latest` + `pullPolicy: Always` | Nicht übernommen. Für dieses Beispiel-Repo bewusst `latest`, siehe Hinweis unter [Deploy](#deploy). |
-| Port 8081 aus `values.ports.management` templaten | Nicht übernommen. `management.server.port` muss wegen Spring AOT ohnehin zur Build-Zeit in `application.properties` stehen, das Templaten im Chart würde ihn nicht wirklich änderbar machen. |
-| CPU-Limit entfernen / In-Place Pod Resize für Start-Boost | Nicht übernommen. CPU-Limit 1 passt zu `ActiveProcessorCount=1` und Serial GC. Mit dem AOT-Cache ist der CPU-intensive Start ohnehin kürzer. |
-| Shell komplett aus dem Image entfernen | Nicht möglich, solange `entrypoint.sh` `${JAVA_OPTS}` expandiert. Alternative wäre `JAVA_TOOL_OPTIONS` + Exec-Form-`ENTRYPOINT`. |
-
----
-
+| `-XX:TieredStopAtLevel=1` entfernen | Kostet auf 1 CPU ~0,45 s Startzeit und mehr CPU, bringt dafür mehr Spitzendurchsatz. Bleibt, bis Lasttests den Durchsatz pro Pod als Engpass zeigen. |
+| `requests.memory` = `limits.memory` | Würde 320Mi pro Pod reservieren, gemessen sind ~120 MiB. Das Eviction-Risiko bei knappem Node-Speicher ist für dieses Beispiel akzeptiert. |
+| Jetty statt Tomcat | Bringt nur einige MB und Threads. Tomcat bleibt bewusst. |
+| Native Image (GraalVM) | Startet schneller und braucht weniger RAM, aber längerer Build und andere Einschränkungen. Der JVM-Weg mit AOT-Cache ist hier der Standard. |
+| `enableServiceLinks: false` | Geringer Nutzen (weniger Umgebungsvariablen bei vielen Services im Namespace). |
+| Probes auf dem Hauptport (`management.endpoint.health.probes.add-additional-paths=true`) | Probes bleiben auf 8081. Einschränkung: Hängt nur der Connector auf 8080, merkt die Probe das nicht. |
+| Fester Image-Tag statt `latest` | Für dieses Beispiel-Repo bewusst `latest`, siehe [Deploy](#deploy). |
+| Port 8081 aus den Helm-Values templaten | `management.server.port` muss wegen Spring AOT in der eingebauten `application.properties` stehen. Im Chart wäre er nicht wirklich änderbar. |
+| CPU-Limit entfernen oder In-Place Pod Resize als Start-Boost | CPU-Limit 1 passt zu `ActiveProcessorCount=1` und Serial GC. Mit dem AOT-Cache ist der CPU-intensive Start ohnehin kurz. |
