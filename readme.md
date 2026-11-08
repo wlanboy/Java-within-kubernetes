@@ -57,12 +57,13 @@ Im Cluster baut die Tekton-Pipeline in [tekton/](tekton/readme.md) das Image mit
 |---|---|
 | ~~`-Djava.security.egd=file:/dev/./urandom`~~ **entfernt** | **ENTFERNT (2026-09-27).** Seit JDK 9 wirkungslos: `SecureRandom` nutzt unter Linux standardmäßig `NativePRNG` mit `/dev/urandom` und blockiert nicht mehr. Seit Kernel 5.6 blockiert außerdem auch `/dev/random` nach der Initialisierung nicht mehr. Der Workaround stammt aus der Java-8-Zeit. |
 | 🆕 `-XX:+UseCompactObjectHeaders` | **NEU (2026-09-27).** JEP 519, seit JDK 25 regulär verfügbar: Objekt-Header 8 statt 12 Byte. Weniger Heap-Verbrauch (typisch 10–20 % bei vielen kleinen Objekten) und bessere Cache-Lokalität. **Muss zum AOT-Cache-Trainingslauf im Dockerfile passen**, siehe [AOT Cache](#-aot-cache-jdk-25). |
-| 🆕 `-XX:NativeMemoryTracking=summary` | **NEU (2026-09-27).** Macht den gesamten Speicher der JVM (Heap, Metaspace, Code-Cache, Threads, GC, AOT-Cache …) per `jcmd` messbar. Grundlage für die Wahl von `resources.memory` und `MaxRAMPercentage`, siehe [Speicher messen](#-speicher-messen-native-memory-tracking). Kostet etwa 1–2 % Speicher und etwas CPU. Kann nach der Messung wieder raus. |
+| ~~`-XX:NativeMemoryTracking=summary`~~ **entfernt** | **ENTFERNT (2026-11-08)** nach der Messung, siehe [Speicher messen](#-speicher-messen-native-memory-tracking). Für neue Messungen temporär per `--set javaOpts=...` ergänzen. |
 | 🆕 `-XX:AOTCache=/app/app.aot` | **NEU (2026-09-27).** Steht im ENTRYPOINT des Dockerfiles, nicht in `javaOpts`, weil der Pfad zum Image gehört. Siehe [AOT Cache](#-aot-cache-jdk-25). |
 | `-XX:+ExitOnOutOfMemoryError` | Lässt die JVM bei einem echten OOM sofort beenden, statt in einem undefinierten Zombie-Zustand weiterzulaufen. In Kubernetes ist das erwünscht: Der Container stirbt sauber, die Liveness-Probe schlägt fehl (oder der Exit passiert direkt) und Kubernetes startet den Pod neu. |
-| `-XX:MaxRAMPercentage=70.0` | Container-aware JVMs (seit JDK 10) leiten die Heap-Größe standardmäßig aus dem cgroup-Memory-Limit ab. Ohne diese Flags nutzt die JVM nur 25 % des Limits als Heap. 70 % lassen ausreichend Puffer für Metaspace, Thread-Stacks, Code-Cache und Off-Heap-Buffer innerhalb des `resources.limits.memory` (hier 512Mi → Heap ≈ 358Mi). |
-| `-XX:InitialRAMPercentage=70.0` | Initial- = Max-Heap, damit die Heap-Größe nicht erst über mehrere GC-Zyklen zur Laufzeit hochwächst (schnellerer, stabilerer Start; für kleine, kurzlebige Microservices üblich). |
-| `-XX:MaxMetaspaceSize=96m` | Deckelt Klassenmetadaten-Speicher (sonst unbegrenzt → Risiko für natives OOM außerhalb des Heaps). |
+| 🆕 `-Xms64m` / `-Xmx128m` | **NEU (2026-11-08)**, ersetzt `MaxRAMPercentage=70` / `InitialRAMPercentage=70`. Bei 512Mi-Limit waren das 358 MB Heap, voll committed, für ~30 MB Live-Daten. Fester Heap nach Messung (siehe [Speicher messen](#-speicher-messen-native-memory-tracking)). Bei mehr Live-Daten `-Xmx` und `limits.memory` gemeinsam erhöhen. |
+| 🆕 `-Xss512k` | **NEU (2026-11-08).** Kleinere Stacks für die verbleibenden Plattform-Threads. Requests laufen auf Virtual Threads, deren Stacks wachsen dynamisch im Heap. |
+| `-XX:MaxMetaspaceSize=64m` | Deckelt Klassenmetadaten-Speicher (sonst unbegrenzt → Risiko für natives OOM außerhalb des Heaps). **2026-11-08:** 96m → 64m, belegt sind ~6 MB, weil die Klassen im AOT-Cache („Shared class space“) liegen. |
+| 🆕 `-XX:ReservedCodeCacheSize=48m` | **NEU (2026-11-08).** Deckelt den JIT-Code-Cache. Mit C1-only (`TieredStopAtLevel=1`) belegt: ~14 MB. Default wäre 240 MB reserviert. |
 | `-XX:MaxDirectMemorySize=32m` | Deckelt NIO-Direct-Buffers (von Tomcat genutzt), verhindert unbemerktes Off-Heap-Wachstum. |
 | `-XX:-UsePerfData` | Kein Schreiben von `/tmp/hsperfdata_*`; passt zu `readOnlyRootFilesystem: true` und spart I/O. |
 | `-XX:+UseSerialGC` | Siehe [GC-Guide](#garbage-collector-guide) unten. Bewusst gewählt, weil der Pod nur 1 CPU-Core hat. |
@@ -111,11 +112,11 @@ Nach Änderungen an diesen Flags im Chart also immer auch das Dockerfile anpasse
 
 **NEU (2026-09-27).** Mit `-XX:NativeMemoryTracking=summary` in `javaOpts` lässt sich der Speicher der JVM im laufenden Pod aufschlüsseln. Das Runtime-Image ist ein JRE ohne `jcmd`, deshalb wird ein JDK-Container als Ephemeral Container an den Pod gehängt.
 
-Der Debug-Container muss mit **derselben UID und GID** (1000:1000) laufen wie die JVM, sonst verweigert der Kernel den Zugriff auf `/proc/1/root/tmp` (Attach-Socket). `kubectl debug --profile=restricted` allein setzt nur die UID, die GID bleibt 0. Daher die `--custom`-Datei:
+Der Debug-Container muss mit **derselben UID und GID** (185:0, UBI-Default) laufen wie die JVM, sonst verweigert der Kernel den Zugriff auf `/proc/1/root/tmp` (Attach-Socket). `kubectl debug --profile=restricted` allein setzt nur die UID, die GID bleibt 0. Daher die `--custom`-Datei:
 
 ```bash
 cat > nmt-debug.json <<'EOF'
-{"securityContext":{"runAsUser":1000,"runAsGroup":1000,"runAsNonRoot":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}
+{"securityContext":{"runAsUser":185,"runAsGroup":0,"runAsNonRoot":true,"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}
 EOF
 
 POD=$(kubectl get pod -n <namespace> -l app=hello-world -o jsonpath='{.items[0].metadata.name}')
@@ -158,6 +159,17 @@ Die JDK-Version des Debug-Images muss zur JVM passen (25). `-XX:-UsePerfData` st
 - `requests.memory: 256Mi` passt zum gemessenen Ruhezustand (~200 MiB), der Worst Case liegt jedoch deutlich darüber. Bei knappem Node-Speicher kann der Pod daher zuerst evicted werden.
 - Die Live-Daten der Hello-World-App (~26 MB) sind im Vergleich zum 360-MB-Heap sehr klein. Für einen echten Service mit mehr Live-Daten gilt das nicht, deshalb hier noch keine Änderung an `resources`/`MaxRAMPercentage`. Erst mit realistischer Last messen und dann anpassen.
 
+**Zweite Messung (2026-11-08)** mit festem Heap `-Xms64m -Xmx128m`, Tomcat ohne WebSocket/EL:
+
+| Messgröße | Docker (`-m 384m --cpus 1`, 170k Requests) | kind (`chart/`, 130k Requests, ~4300 req/s) |
+|---|---|---|
+| NMT committed gesamt | 146 MB (Heap 64, AOT-Cache 52, Code 14, Metaspace 6) | |
+| Heap belegt | ~30 MB (Tenured 16 MB) | |
+| RSS / `memory.peak` | 119 MiB | 111–127 MiB |
+| Startzeit | 0,77 s | 0,79 s |
+
+Daraus: `requests.memory: 160Mi`, `limits.memory: 320Mi` (Heap 128 + AOT-Cache 64 + Code-Cache 48 + Metaspace + Direct 32 + Threads/GC), `requests.cpu: 100m`.
+
 ---
 
 ## Garbage-Collector-Guide
@@ -196,11 +208,11 @@ Die JDK-Version des Debug-Images muss zur JVM passen (25). `-XX:-UsePerfData` st
 | Setting | Wert | Begründung |
 |---|---|---|
 | `resources.limits.cpu` | `1` | Deckt sich mit `-XX:ActiveProcessorCount=1` und der Wahl von Serial GC. Ein einzelner GC-Thread kann den einen verfügbaren Core voll nutzen, ohne dass CFS-Throttling zwischen mehreren GC-Threads hin- und herschaltet. |
-| `resources.requests.cpu` | `250m` | Erlaubt Kubernetes ein engeres Bin-Packing im Node, während Burst bis zum Limit (1 Core) für Lastspitzen/Start (AOT-Klassenladen, JIT) möglich bleibt. |
-| `resources.limits.memory` | `512Mi` | Ergibt mit `-XX:MaxRAMPercentage=70.0` einen Heap von ~358Mi; von den verbleibenden ~154Mi sind `-XX:MaxMetaspaceSize=96m` und `-XX:MaxDirectMemorySize=32m` explizit gedeckelt (zusammen 128Mi), der Rest (~26Mi) puffert Thread-Stacks (`threads.max=20` × Default-Stackgröße) und Code-Cache. |
-| `resources.requests.memory` | `256Mi` | Realistischer Ruhezustands-Verbrauch nach dem Start; verhindert übermäßiges Overcommitment auf dem Node bei gleichzeitig ausreichend Headroom bis zum Limit. |
+| `resources.requests.cpu` | `100m` (bis 2026-11-08: `250m`) | Im Leerlauf nahe 0. Erlaubt Kubernetes ein engeres Bin-Packing im Node, während Burst bis zum Limit (1 Core) für Lastspitzen/Start (AOT-Klassenladen, JIT) möglich bleibt. |
+| `resources.limits.memory` | `320Mi` (bis 2026-11-08: `512Mi`) | Heap `-Xmx128m` + AOT-Cache (~64 MB) + Code-Cache (`48m`) + Metaspace (belegt ~6 MB, Deckel `64m`) + Direct-Memory (`32m`) + Thread-Stacks/GC. Gemessener Peak: 127 MiB. |
+| `resources.requests.memory` | `160Mi` (bis 2026-11-08: `256Mi`) | Gemessener RSS unter Last (111–127 MiB) plus Puffer. |
 
-**Wichtig:** `limits.memory` sollte nie so knapp gewählt werden, dass `MaxRAMPercentage` den gesamten Container-Speicher als Heap beansprucht (kein Puffer für Metaspace/Threads → OOMKilled trotz "funktionierender" Heap-Größe). 70 % ist hierfür ein bewährter Kompromiss.
+**Wichtig:** `-Xmx` und `limits.memory` immer gemeinsam ändern. Der Speicher außerhalb des Heaps (AOT-Cache, Code-Cache, Metaspace, Direct-Memory, Threads) liegt hier bei ~150–190 MB.
 
 ---
 
@@ -238,7 +250,7 @@ Gilt für `chart/` und `chart-hpa/` gleichermaßen. In `manifests/` ist bisher n
 |---|---|---|---|
 | JDK-AOT-Cache | `service/Dockerfile` | Startzeit etwa halbiert (gemessen 0,9 s statt 1,8 s), wichtig für Scale-up und Scale-from-zero | [AOT Cache](#-aot-cache-jdk-25) |
 | `-XX:+UseCompactObjectHeaders` | `javaOpts`, `manifests/deployment.yaml`, Dockerfile-Training | weniger Heap | [JVM-Flags](#jvm-flags-java_opts-in-manifestsdeploymentyaml) |
-| `-XX:NativeMemoryTracking=summary` | `javaOpts` | `resources.memory` auf Messwerte statt Schätzung stützen | [Speicher messen](#-speicher-messen-native-memory-tracking) |
+| `-XX:NativeMemoryTracking=summary` | `javaOpts` | `resources.memory` auf Messwerte statt Schätzung stützen (2026-11-08 nach der Messung wieder entfernt) | [Speicher messen](#-speicher-messen-native-memory-tracking) |
 | Virtual Threads | `application.properties` (Build-Zeit) | Blockierendes I/O belegt keine Plattform-Threads | [Server-/Tomcat-Konfiguration](#server-tomcat-konfiguration-manifestsconfigmapyaml) |
 | native preStop-Sleep | `deployment.yaml` | keine Shell für den Hook nötig | [Graceful Shutdown & Istio](#graceful-shutdown--istio) |
 | Istio nativer Sidecar + `holdApplicationUntilProxyStarts` | `podAnnotations` | korrekte Start-/Stop-Reihenfolge App ↔ Envoy | [Graceful Shutdown & Istio](#graceful-shutdown--istio) |
@@ -258,7 +270,7 @@ Gilt für `chart/` und `chart-hpa/` gleichermaßen. In `manifests/` ist bisher n
 
 | Vorschlag | Warum nicht (vorerst) |
 |---|---|
-| `requests.memory` = `limits.memory`, `MaxRAMPercentage` senken | Erst mit NMT unter realistischer Last messen. Die erste Messung (siehe oben) zeigt ~200 MiB real bei 440 MB committed und damit keinen akuten Handlungsbedarf für die Hello-World-App. |
+| `requests.memory` = `limits.memory` | Nicht übernommen. **2026-11-08:** `MaxRAMPercentage` durch festen Heap ersetzt, Requests/Limits nach Messung gesenkt (siehe [Resource-Limits](#resource-limits-manifestsdeploymentyaml)). |
 | `-XX:TieredStopAtLevel=1` entfernen | Trade-off: schnellerer Start und weniger CPU gegen geringeren Spitzendurchsatz (kein C2). Beibehalten, bis Lasttests zeigen, dass der Durchsatz pro Pod der Engpass ist. Hinweis: Die Methoden-Profile im AOT-Cache (JEP 515) nützen vor allem C2, mit C1-only bringt der Cache vor allem Klassenladen/Linking. |
 | `enableServiceLinks: false` | Nicht übernommen. Nur geringer Nutzen (weniger Umgebungsvariablen bei vielen Services im Namespace). |
 | Probes auf dem Hauptport (`management.endpoint.health.probes.add-additional-paths=true`) | Nicht übernommen. Probes bleiben auf dem separaten Management-Port 8081. Einschränkung: Hängt nur der Haupt-Connector (8080), bemerkt die Probe das nicht. |

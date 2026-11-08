@@ -49,12 +49,12 @@ spec:
                 topologyKey: kubernetes.io/hostname
       securityContext:
         runAsNonRoot: true
-        # 1000 muss exakt zur UID/GID im Runtime-Image passen (siehe service/Dockerfile,
-        # "addgroup -g 1000 ... adduser -u 1000 ..."), sonst schlaegt der Start fehl
-        runAsUser: 1000
+        # 185 muss zur UID im Runtime-Image passen (ubi10/openjdk-25-runtime, siehe service/Dockerfile),
+        # sonst schlaegt der Start fehl
+        runAsUser: 185
         # gleiche GID wie runAsUser, damit gemountete Volumes (config/tmp) fuer den
         # Prozess beschreibbar/lesbar sind, ohne dass das Image root braucht
-        fsGroup: 1000
+        fsGroup: 185
         seccompProfile:
           # RuntimeDefault statt Unconfined: nutzt das vom Cluster/Runtime
           # bereitgestellte Standard-Seccomp-Profil als Basis-Haertung
@@ -94,11 +94,11 @@ spec:
               value: "Europe/Berlin"
             # JAVA_OPTS: JVM-Flags fuer ressourcenschonenden Betrieb im Container.
             # Reihenfolge der Kommentare entspricht der Reihenfolge der Flags im Wert unten:
-            #   -Djava.security.egd=file:/dev/./urandom  -> nicht-blockierende Zufallszahlenquelle statt /dev/random (verhindert Startverzoegerung durch Entropie-Mangel)
             #   -XX:+ExitOnOutOfMemoryError               -> Prozess beendet sich sofort bei Heap-OOM statt in kaputtem Zustand weiterzulaufen; Kubernetes startet den Pod neu
-            #   -XX:MaxRAMPercentage=70.0                 -> maximale Heap-Groesse als Anteil des Container-Memory-Limits (~358Mi von 512Mi)
-            #   -XX:InitialRAMPercentage=70.0             -> initiale Heap-Groesse identisch zum Max, kein Nachvergroessern zur Laufzeit noetig
-            #   -XX:MaxMetaspaceSize=96m                  -> deckelt Klassenmetadaten-Speicher (sonst unbegrenzt -> Risiko fuer natives OOM ausserhalb des Heaps)
+            #   -Xms64m / -Xmx128m                        -> NEU (2026-11-08): fester Heap statt RAM-Prozent; gemessen ~30 MB belegt nach 170k Requests
+            #   -Xss512k                                  -> kleinere Stacks fuer Plattform-Threads (Requests laufen auf Virtual Threads)
+            #   -XX:MaxMetaspaceSize=64m                  -> deckelt Klassenmetadaten-Speicher (belegt ~6 MB, Klassen liegen im AOT-Cache)
+            #   -XX:ReservedCodeCacheSize=48m             -> deckelt JIT-Code-Cache (nur C1, belegt ~14 MB)
             #   -XX:MaxDirectMemorySize=32m               -> deckelt NIO-Direct-Buffers (von Tomcat genutzt), verhindert unbemerktes Off-Heap-Wachstum
             #   -XX:-UsePerfData                          -> kein Schreiben von /tmp/hsperfdata_*; passt zu readOnlyRootFilesystem und spart I/O
             #   -XX:+UseSerialGC                          -> Single-Threaded GC passend zu 1 CPU-Core, kein Overhead durch Parallel-/G1-GC-Threads
@@ -106,13 +106,14 @@ spec:
             #   -XX:ActiveProcessorCount=1                -> JVM sieht nur 1 Core; muss zum CPU-Limit unten passen, sonst ueberschaetzte Thread-Pools/GC-Threads
             #   -XX:TieredStopAtLevel=1                   -> nur C1-Compiler (kein C2); spart CPU/Speicher fuer JIT, passend fuer kleine/kurzlebige Workloads
             #   -Dspring.aot.enabled=true                 -> aktiviert zur Laufzeit die beim Build per spring-boot:process-aot generierten AOT-Metadaten (weniger Reflection/Proxy-Arbeit beim Start -> schnellerer, ressourcenschonenderer Boot)
-            - name: JAVA_OPTS
+            - name: JAVA_TOOL_OPTIONS
               value: >-
-                -Djava.security.egd=file:/dev/./urandom
                 -XX:+ExitOnOutOfMemoryError
-                -XX:MaxRAMPercentage=70.0
-                -XX:InitialRAMPercentage=70.0
-                -XX:MaxMetaspaceSize=96m
+                -Xms64m
+                -Xmx128m
+                -Xss512k
+                -XX:MaxMetaspaceSize=64m
+                -XX:ReservedCodeCacheSize=48m
                 -XX:MaxDirectMemorySize=32m
                 -XX:-UsePerfData
                 -XX:+UseSerialGC
@@ -165,9 +166,9 @@ spec:
             requests:
               # niedrig angesetzt fuer engeres Bin-Packing im Node; Burst bis zum
               # Limit (1 Core) fuer Lastspitzen/Start (AOT-Klassenladen, JIT) bleibt moeglich
-              cpu: "250m"
-              # realistischer Ruhezustands-Verbrauch nach dem Start
-              memory: "256Mi"
+              cpu: "100m"
+              # gemessener RSS unter Last ~120 MiB + Puffer
+              memory: "160Mi"
               # Platz fuer Logs/temporaere Dateien im Normalbetrieb;
               # das Limit (256Mi) deckelt Ausreisser wie Heap-Dumps
               ephemeral-storage: "128Mi"
@@ -176,9 +177,9 @@ spec:
               # gehalten, damit sich JVM und Istio-Sidecar einen Core teilen
               # koennen, ohne sich gegenseitig zu throtteln
               cpu: "1"
-              # Heap (70% von 512Mi ~ 358Mi) + Metaspace (96m) + Direct-Memory (32m)
-              # + Thread-Stacks/Code-Cache-Puffer
-              memory: "512Mi"
+              # Heap (128m) + AOT-Cache (~64m) + Code-Cache (48m) + Metaspace
+              # + Direct-Memory (32m) + Thread-Stacks/GC-Puffer
+              memory: "320Mi"
               # deckelt Logs/Heap-Dumps im "tmp" emptyDir (readOnlyRootFilesystem)
               ephemeral-storage: "256Mi"
           volumeMounts:

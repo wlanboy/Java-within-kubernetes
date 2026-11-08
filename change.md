@@ -6,7 +6,7 @@
 - **Start und Shutdown:** Native Istio-Sidecars und der native preStop-Sleep sorgen dafür, dass beim Start und beim Graceful Shutdown keine Requests verloren gehen.
 - **Betrieb:** Pods im CrashLoop blockieren keinen Node-Drain mehr, `/tmp` ist auf 64Mi begrenzt, und die Standard-Labels `app.kubernetes.io/*` sind gesetzt.
 - **Aufgeräumt:** Wirkungslose Optionen (`java.security.egd`, Tomcat-Thread-Limits) sind entfernt.
-- **Offen:** Memory-Requests/-Limits und `TieredStopAtLevel=1` bleiben, bis Messungen unter Last vorliegen.
+- **Offen:** `TieredStopAtLevel=1` bleibt, bis Lasttests den Durchsatz pro Pod als Engpass zeigen. Memory-Requests/-Limits sind seit 2026-11-08 nach Messung gesenkt (siehe unten).
 
 Wichtig beim Ändern: Die JVM-Flags müssen im Chart und im Dockerfile-Trainingslauf übereinstimmen, sonst verwirft die JVM den AOT-Cache.
 
@@ -50,3 +50,14 @@ Wichtig beim Ändern: Die JVM-Flags müssen im Chart und im Dockerfile-Trainings
 - `service/src/layers.xml` mit `observability-dependencies` und `application-resources`, aktiviert in der `pom.xml`.
 - OCI-Labels gesetzt.
 - Gemessen (`-m 256m`, read-only, 1 CPU): Start 0,38 s, Tomcat auf 8080 und 8081, ca. 93 MiB, 7519 von 8771 Klassen aus dem AOT-Cache, `app.aot` 59 MB, Image 632 MB.
+
+## [update] 2026-11-08: Minimaler Tomcat, fester Heap, kleinere Requests
+
+Gilt für `chart/`, `chart-hpa/` und `manifests/`. Getestet mit `chart/` im kind-Cluster.
+
+- **Tomcat ohne WebSocket und EL:** `tomcat-embed-websocket` und `tomcat-embed-el` in der `pom.xml` ausgeschlossen, es bleibt nur `tomcat-embed-core`.
+- **Fester Heap:** `-Xms64m -Xmx128m` statt `Max-/InitialRAMPercentage=70` (vorher 358 MB Heap für ~30 MB Live-Daten). Dazu `-Xss512k`, `-XX:ReservedCodeCacheSize=48m`, `MaxMetaspaceSize` 96m → 64m. `NativeMemoryTracking` nach der Messung entfernt.
+- **Resources:** requests 250m/256Mi → 100m/160Mi, limits.memory 512Mi → 320Mi, CPU-Limit bleibt 1.
+- **`manifests/deployment.yaml`:** `-Djava.security.egd` jetzt auch dort entfernt.
+- **Dockerfile:** `EXPOSE 8080 8081` (Actuator).
+- Gemessen in kind (`chart/`): Start 0,79 s, ~4300 req/s, `memory.peak` 111–127 MiB, keine Restarts. Docker (`-m 384m`): NMT 146 MB committed, Heap ~30 MB belegt, 7511/8749 Klassen aus dem AOT-Cache.

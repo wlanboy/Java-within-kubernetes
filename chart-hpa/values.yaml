@@ -95,8 +95,8 @@ podAntiAffinity:
 
 podSecurityContext:
   runAsNonRoot: true
-  runAsUser: 1000
-  fsGroup: 1000
+  runAsUser: 185
+  fsGroup: 185
   seccompProfile:
     type: RuntimeDefault
 
@@ -148,33 +148,42 @@ env:
 # NEU: -XX:+UseCompactObjectHeaders (JEP 519): 8 statt 12 Byte Objekt-Header,
 #      weniger Heap-Verbrauch. Muss zum AOT-Cache-Trainingslauf im Dockerfile
 #      passen (ebenso -XX:+UseSerialGC), sonst verwirft die JVM den Cache.
-# NEU: -XX:NativeMemoryTracking=summary: macht den gesamten JVM-Speicher
-#      (Heap + Metaspace + Code-Cache + Threads + GC + ...) per
-#      "jcmd 1 VM.native_memory summary" messbar, Grundlage fuer resources.memory
-#      (siehe readme.md "Speicher messen"). Kostet ca. 1-2 % Speicher und etwas
-#      CPU, nach der Messung kann es wieder raus.
+# Speicher messen: -XX:NativeMemoryTracking=summary temporaer per --set javaOpts
+#      ergaenzen, dann "jcmd 1 VM.native_memory summary" (siehe readme.md).
+# NEU (2026-11-08): fester Heap -Xms64m/-Xmx128m statt Max-/InitialRAMPercentage=70
+#      (bei 512Mi-Limit waren das 358Mi Initial-Heap). Gemessen in kind/Docker nach
+#      170k Requests: Heap ~30 MB belegt, 146 MB committed (NMT), RSS ~120 MiB.
+#      MaxMetaspaceSize 96m -> 64m (belegt 6 MB, Klassen liegen im AOT-Cache),
+#      ReservedCodeCacheSize=48m (nur C1, belegt 14 MB), -Xss512k.
+#      NativeMemoryTracking=summary nach der Messung entfernt.
 javaOpts: >-
   -XX:+ExitOnOutOfMemoryError
-  -XX:MaxRAMPercentage=70.0
-  -XX:InitialRAMPercentage=70.0
-  -XX:MaxMetaspaceSize=96m
+  -Xms64m
+  -Xmx128m
+  -Xss512k
+  -XX:MaxMetaspaceSize=64m
+  -XX:ReservedCodeCacheSize=48m
   -XX:MaxDirectMemorySize=32m
   -XX:-UsePerfData
   -XX:+UseSerialGC
   -XX:+UseCompactObjectHeaders
-  -XX:NativeMemoryTracking=summary
   -XX:ActiveProcessorCount=1
   -XX:TieredStopAtLevel=1
   -Dspring.aot.enabled=true
 
+# NEU (2026-11-08): requests 250m/256Mi -> 100m/160Mi, limit memory 512Mi -> 320Mi.
+#   requests.memory: gemessener RSS unter Last ~120 MiB + Puffer
+#   limits.memory:   Heap 128 + AOT-Cache 64 + Code-Cache 48 + Metaspace + Direct 32
+#                    + Threads/GC/Sonstiges
+#   requests.cpu:    Leerlauf nahe 0; Start und Lastspitzen bursten bis zum Limit (1 Core)
 resources:
   requests:
-    cpu: "250m"
-    memory: "256Mi"
+    cpu: "100m"
+    memory: "160Mi"
     ephemeral-storage: "128Mi"
   limits:
     cpu: "1"
-    memory: "512Mi"
+    memory: "320Mi"
     ephemeral-storage: "256Mi"
 
 startupProbe:

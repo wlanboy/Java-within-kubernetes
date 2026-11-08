@@ -59,7 +59,7 @@ spec:
             - name: {{ $key }}
               value: {{ $value | quote }}
             {{- end }}
-            - name: JAVA_OPTS
+            - name: JAVA_TOOL_OPTIONS
               value: >-
                 {{ .Values.javaOpts | trim }}
           startupProbe:
