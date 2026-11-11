@@ -1,0 +1,8 @@
+# Allowlist: Der Build braucht nur pom.xml, src/main und src/layers.xml.
+# src/test bleibt draussen, weil der Build mit -Dmaven.test.skip=true laeuft. Sonst
+# macht jede Test-Aenderung den Layer "COPY src" ungueltig und erzwingt einen
+# kompletten Maven-Build inklusive AOT-Trainingslauf. target/ bleibt ebenfalls draussen.
+*
+!pom.xml
+!src/main/
+!src/layers.xml
