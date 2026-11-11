@@ -32,6 +32,8 @@ WORKDIR /build
 COPY pom.xml .
 RUN --mount=type=cache,target=/home/default/.m2,uid=185 mvn -q dependency:go-offline
 
+# .dockerignore lässt nur src/main und src/layers.xml durch. Änderungen an src/test machen
+# diesen Layer damit nicht ungültig.
 COPY src ./src
 
 # javac-Optionen: Hier gibt es nichts zu holen. javac optimiert praktisch nicht, das macht zur
