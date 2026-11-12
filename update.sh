@@ -3,7 +3,16 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-IMAGE="registry.gmk.lan/helloworld:latest"
+REGISTRY="registry.gmk.lan"
+
+for arg in "$@"; do
+  case "$arg" in
+    --local) REGISTRY="localhost:5001" ;;  # kind-registry (docker ps: 127.0.0.1:5001->5000)
+    *) echo "Unbekannte Option: $arg" >&2; echo "Usage: $0 [--local]" >&2; exit 1 ;;
+  esac
+done
+
+IMAGE="$REGISTRY/helloworld:latest"
 NAMESPACE="default"
 
 echo "==> Baue Image (service/Dockerfile) ..."
