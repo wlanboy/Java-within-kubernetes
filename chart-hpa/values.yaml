@@ -224,14 +224,16 @@ tmpSizeLimit: 64Mi
 # HPA-Skalierung (auch scale-to-zero via autoscaling.minReplicas: 0) ist davon
 # NICHT betroffen, da der ReplicaSet-Controller die Pods dabei direkt loescht
 # und nicht ueber die Eviction-API geht, die die PDB durchsetzt.
-# Achtung trotzdem: minAvailable muss kleiner als die aktuelle Replica-Zahl
-# sein, sonst wird jede freiwillige Disruption blockiert. Sobald der HPA
-# (z.B. nach dem Hochskalieren aus 0) nur 1 Pod faehrt, verhindert
-# minAvailable: 1 damit jeden Node-Drain dieses einen Pods, bis erneut
-# hochskaliert wurde.
+# Achtung: Mit minAvailable: 1 blockiert die Eviction-API jede Verdraengung,
+# sobald der HPA (z.B. nach dem Hochskalieren aus 0) nur 1 Pod faehrt, und
+# kubectl drain haengt, bis erneut hochskaliert wurde. Deshalb gilt hier
+# maxUnavailable: 1: Es darf immer ein Pod gleichzeitig evicted werden, egal wie
+# viele Replicas der HPA gerade faehrt. Alternativ minAvailable setzen (dann
+# maxUnavailable entfernen, beide zusammen sind in K8s nicht erlaubt); der Wert
+# muss dann kleiner als die aktuelle Replica-Zahl sein.
 podDisruptionBudget:
   enabled: true
-  minAvailable: 1
+  maxUnavailable: 1
   # NEU: Pods, die nicht Ready sind (z.B. CrashLoopBackOff), duerfen immer
   # evicted werden. Mit dem Default (IfHealthyBudget) blockiert ein kaputter Pod
   # jeden Node-Drain, obwohl er ohnehin keinen Traffic bedient (GA seit K8s 1.31).

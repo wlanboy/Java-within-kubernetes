@@ -6,7 +6,11 @@ metadata:
   labels:
     {{- include "hello-world-hpa.labels" . | nindent 4 }}
 spec:
+  {{- if hasKey .Values.podDisruptionBudget "maxUnavailable" }}
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  {{- else }}
   minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  {{- end }}
   {{- with .Values.podDisruptionBudget.unhealthyPodEvictionPolicy }}
   unhealthyPodEvictionPolicy: {{ . }}
   {{- end }}
