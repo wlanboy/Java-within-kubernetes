@@ -15,7 +15,10 @@
 	<description/>
 	<url/>
 	<licenses>
-		<license/>
+		<license>
+			<name>Apache-2.0</name>
+			<url>https://www.apache.org/licenses/LICENSE-2.0</url>
+		</license>
 	</licenses>
 	<developers>
 		<developer/>
@@ -96,6 +99,15 @@
 					<runOnlyOnce>true</runOnlyOnce>
 					<!-- Parent setzt verbose=true -->
 					<verbose>false</verbose>
+					<!-- Nur diese Felder landen in git.properties (und damit im Image). Der Default
+					     nimmt auch Name/E-Mail des Build-Users, den Hostnamen und die Remote-URL mit;
+					     klont CI mit Token in der URL, stuende das Token im veroeffentlichten Image. -->
+					<includeOnlyProperties>
+						<includeOnlyProperty>^git\.branch$</includeOnlyProperty>
+						<includeOnlyProperty>^git\.commit\.id(\.abbrev)?$</includeOnlyProperty>
+						<includeOnlyProperty>^git\.commit\.time$</includeOnlyProperty>
+						<includeOnlyProperty>^git\.build\.version$</includeOnlyProperty>
+					</includeOnlyProperties>
 				</configuration>
 			</plugin>
 			<plugin>

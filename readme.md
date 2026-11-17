@@ -85,8 +85,8 @@ gecachtes `latest`.
 
 | Stage | Base Image | Aufgabe |
 |---|---|---|
-| `build` | `registry.access.redhat.com/ubi10/openjdk-25:latest` | Maven-Build mit Spring AOT, Layer extrahieren, AOT-Cache trainieren |
-| Runtime | `registry.access.redhat.com/ubi10/openjdk-25-runtime:latest` | nur JRE, keine `RUN`-Befehle |
+| `build` | `registry.access.redhat.com/ubi10/openjdk-25:${UBI_TAG}` | Maven-Build mit Spring AOT, Layer extrahieren, AOT-Cache trainieren |
+| Runtime | `registry.access.redhat.com/ubi10/openjdk-25-runtime:${UBI_TAG}` | nur JRE, keine `RUN`-Befehle |
 
 Voraussetzung in der [pom.xml](service/pom.xml):
 

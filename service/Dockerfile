@@ -9,6 +9,12 @@
 # <start-class>com.example.helloworld.HelloworldApplication</start-class>.
 # Erklärung aller Schritte: readme.md, Abschnitt "Docker-Image".
 
+# Gemeinsamer Tag für Build- und Runtime-Image, muss vor dem ersten FROM stehen. Der AOT-Cache
+# verlangt exakt denselben JVM-Build in Training und Laufzeit, deshalb nie zwei unabhängige
+# Tags oder Digests. Pinnen mit einem Versions-Tag (Label "version" im Image), z. B.
+#   docker build --build-arg UBI_TAG=1.24 ...
+ARG UBI_TAG=latest
+
 # --- Optionaler Build-Kontext für das git-commit-id-maven-plugin ---
 # Leere Default-Stage. Mit "docker build --build-context git=.git service/" ersetzt BuildKit
 # sie durch das .git-Verzeichnis des Repos (der Kontext service/ enthält kein .git).
@@ -16,7 +22,7 @@
 # (/actuator/info liefert dann {}).
 FROM scratch AS git
 
-FROM registry.access.redhat.com/ubi10/openjdk-25:latest AS build
+FROM registry.access.redhat.com/ubi10/openjdk-25:${UBI_TAG} AS build
 # Das UBI-Build-Image läuft als User 185 mit HOME=/home/default. WORKDIR legt fehlende
 # Verzeichnisse als root an, deshalb hier einmal als root /build (Maven) und /app (Training)
 # anlegen und 185 übergeben.
@@ -106,8 +112,9 @@ RUN java -XX:AOTCacheOutput=/app/app.aot \
 
 # --- Runtime ---
 # Der AOT-Cache gilt nur mit exakt demselben JVM-Build wie im Training. Nach Base-Image-Updates
-# beide :latest-Tags neu ziehen (docker pull), sonst startet die JVM ohne Cache.
-FROM registry.access.redhat.com/ubi10/openjdk-25-runtime:latest
+# beide Images neu ziehen (docker pull), sonst startet die JVM ohne Cache.
+FROM registry.access.redhat.com/ubi10/openjdk-25-runtime:${UBI_TAG}
+ARG UBI_TAG
 
 # version synchron zur pom.xml halten
 LABEL org.opencontainers.image.title="helloworld" \
@@ -115,8 +122,8 @@ LABEL org.opencontainers.image.title="helloworld" \
       org.opencontainers.image.version="0.0.1-SNAPSHOT" \
       org.opencontainers.image.vendor="wlanboy" \
       org.opencontainers.image.source="https://github.com/wlanboy/Java-within-kubernetes" \
-      org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.base.name="registry.access.redhat.com/ubi10/openjdk-25-runtime:latest"
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.base.name="registry.access.redhat.com/ubi10/openjdk-25-runtime:${UBI_TAG}"
 
 WORKDIR /app
 # Ein COPY pro Layer aus src/layers.xml, seltenste Änderung zuerst. Bei einer Code-Änderung
@@ -134,6 +141,13 @@ COPY --from=build --chown=185:185 /app/app.aot ./
 USER 185
 # 8080 = App, 8081 = Actuator (management.server.port)
 EXPOSE 8080 8081
+# Defaults für ein nacktes "docker run", gleiche Werte wie Helm javaOpts und
+# manifests/deployment.yaml (Heap gemessen ~30 MB unter Last). Helm, Manifeste und Compose
+# ersetzen die Variable komplett, also dort immer den vollständigen Satz setzen.
+# Keine GC- oder Header-Flags hier: Die stehen im ENTRYPOINT und müssen zum Training passen.
+ENV JAVA_TOOL_OPTIONS="-Xms64m -Xmx128m -Xss512k \
+  -XX:MaxMetaspaceSize=64m -XX:ReservedCodeCacheSize=48m -XX:MaxDirectMemorySize=32m \
+  -XX:-UsePerfData -XX:ActiveProcessorCount=1 -XX:TieredStopAtLevel=1"
 # Exec-Form ohne Shell und ohne Startskript: java ist PID 1 und bekommt SIGTERM direkt
 # (nötig für Graceful Shutdown). Hier stehen nur die Flags, die zum Image gehören:
 # Cache-Pfad sowie GC- und Header-Flags passend zum Training. Heap, Metaspace, CPU-Anzahl usw.
