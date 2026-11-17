@@ -237,6 +237,8 @@ Zwei Einschränkungen:
 `spring.aot.enabled`, GC- und Header-Flags passend zum Training sowie `ExitOnOutOfMemoryError`.
 Damit nutzt auch ein nacktes `docker run` den Cache. Heap, Metaspace, CPU-Anzahl usw. kommen aus
 `JAVA_TOOL_OPTIONS` (Helm-Value `javaOpts`), weil sie zu den Resources des Pods passen müssen.
+Das Image setzt dieselben Werte per `ENV JAVA_TOOL_OPTIONS` als Default für ein nacktes `docker run`.
+Helm, Manifeste und Compose ersetzen die Variable komplett.
 
 Die GC- und Header-Flags stehen zusätzlich auch in `JAVA_TOOL_OPTIONS`, damit `check.py`,
 `check.sh` und jeder Leser des Deployments sie sehen. Die JVM wertet `JAVA_TOOL_OPTIONS` vor der
