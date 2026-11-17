@@ -1,7 +1,7 @@
 # Tekton-Pipeline
 
 Baut das Image aus `service/Dockerfile` im Cluster und pusht es in eine Registry, das Gegenstück zu
-`docker build --build-context git=.git -t wlanboy/helloworld:latest service/`.
+`docker build -t wlanboy/helloworld:latest service/`.
 
 | Datei | Inhalt |
 |---|---|
@@ -42,12 +42,8 @@ Wahl, siehe Hinweis zum Image-Tag in der [readme](../readme.md#deploy).
 
 ## Details
 
-**Warum BuildKit und nicht Kaniko:** Das Dockerfile braucht `RUN --mount=type=cache` (Maven-Repository)
-und `RUN --mount=type=bind,from=git` (Named Build Context für `.git`). Das unterstützt nur BuildKit.
-`--build-context git=.git` wird zu `--local git=<workspace>/.git --opt context:git=local:git`.
-
-**Git-Infos:** `git-clone` checkt mit `depth=1` aus. Für das `git-commit-id-maven-plugin` reicht das,
-`git.commit.id`, `git.branch` und Co. landen in `/actuator/info`. Fehlt `.git`, läuft der Build ohne Git-Infos durch.
+**Warum BuildKit und nicht Kaniko:** Das Dockerfile braucht `RUN --mount=type=cache` für das
+Maven-Repository. Das unterstützt nur BuildKit.
 
 **Cache:** Der PipelineRun bindet die PVC `helloworld-buildkit-cache`, dadurch bleiben Layer und
 `/root/.m2` zwischen den Runs erhalten. BuildKit sperrt das Verzeichnis, zwei Runs mit derselben PVC

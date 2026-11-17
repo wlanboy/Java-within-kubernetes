@@ -48,7 +48,7 @@ feste Heap. Tomcat ohne WebSocket/EL bringt nur wenige MB.
 ## Deploy
 
 ```bash
-docker build --build-context git=.git -t wlanboy/helloworld:latest service/
+docker build -t wlanboy/helloworld:latest service/
 kubectl apply -f manifests/
 # oder per Helm
 helm upgrade --install hello-world chart/
@@ -63,11 +63,6 @@ Es gibt drei Varianten mit denselben Einstellungen:
 | [chart-hpa/](chart-hpa/chart-hpa.md) | Helm-Chart mit HorizontalPodAutoscaler und Scale-to-Zero |
 
 Änderungen an JVM-Flags, Resources oder der ConfigMap immer in allen drei nachziehen.
-
-`--build-context git=.git` hängt das `.git`-Verzeichnis als Bind-Mount in den Maven-Build. Das
-`git-commit-id-maven-plugin` erzeugt damit eine `git.properties` (Commit, Branch, Tags unter
-`/actuator/info`). Der Build-Kontext `service/` enthält selbst kein `.git`. Ohne den Parameter
-läuft der Build trotzdem durch, nur ohne Git-Infos.
 
 Im Cluster baut die Tekton-Pipeline in [tekton/](tekton/readme.md) das Image mit BuildKit und pusht es.
 

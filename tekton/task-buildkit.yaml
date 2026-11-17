@@ -1,9 +1,7 @@
 # Baut service/Dockerfile mit BuildKit (rootless, daemonless) und pusht das Image.
 #
-# Warum BuildKit statt Kaniko: Das Dockerfile nutzt "RUN --mount=type=cache" und
-# "RUN --mount=type=bind,from=git" (Named Build Context fuer .git). Beides kann nur BuildKit.
-# Das Gegenstueck zu "docker build --build-context git=.git" ist hier
-# "--local git=<pfad> --opt context:git=local:git".
+# Warum BuildKit statt Kaniko: Das Dockerfile nutzt "RUN --mount=type=cache" fuer das
+# Maven-Repository. Das kann nur BuildKit.
 apiVersion: tekton.dev/v1
 kind: Task
 metadata:
@@ -31,7 +29,7 @@ spec:
       default: docker.io/moby/buildkit:v0.33.1-rootless
   workspaces:
     - name: source
-      description: Ausgecheckter Quellcode inkl. .git
+      description: Ausgecheckter Quellcode
       readOnly: true
     - name: dockerconfig
       description: Secret mit config.json fuer den Registry-Login
@@ -62,8 +60,6 @@ spec:
           value: $(params.commit)
         - name: CONTEXT_DIR
           value: $(workspaces.source.path)/$(params.context)
-        - name: GIT_DIR
-          value: $(workspaces.source.path)/.git
         - name: BUILD_CPUS
           value: $(params.build-cpus)
         - name: DOCKERCONFIG_BOUND
@@ -92,21 +88,11 @@ spec:
           NAMES="${NAMES},${IMAGE}:$(printf '%s' "${COMMIT}" | cut -c1-7)"
         fi
 
-        # Wie "docker build --build-context git=.git": ohne .git bleibt die Stage "git" leer,
-        # der Build laeuft dann ohne git.properties durch.
-        set --
-        if [ -f "${GIT_DIR}/HEAD" ]; then
-          set -- --local git="${GIT_DIR}" --opt context:git=local:git
-        else
-          echo "Kein .git gefunden, baue ohne Git-Infos"
-        fi
-
         echo "Baue ${NAMES}"
         buildctl-daemonless.sh build \
           --frontend dockerfile.v0 \
           --local context="${CONTEXT_DIR}" \
           --local dockerfile="${CONTEXT_DIR}" \
-          "$@" \
           --opt build-arg:BUILD_CPUS="${BUILD_CPUS}" \
           --output "type=image,\"name=${NAMES}\",push=true" \
           --metadata-file /tmp/metadata.json

@@ -15,13 +15,6 @@
 #   docker build --build-arg UBI_TAG=1.24 ...
 ARG UBI_TAG=latest
 
-# --- Optionaler Build-Kontext für das git-commit-id-maven-plugin ---
-# Leere Default-Stage. Mit "docker build --build-context git=.git service/" ersetzt BuildKit
-# sie durch das .git-Verzeichnis des Repos (der Kontext service/ enthält kein .git).
-# Ohne den Parameter bleibt sie leer: Der Build läuft durch, es fehlt nur git.properties
-# (/actuator/info liefert dann {}).
-FROM scratch AS git
-
 FROM registry.access.redhat.com/ubi10/openjdk-25:${UBI_TAG} AS build
 # Das UBI-Build-Image läuft als User 185 mit HOME=/home/default. WORKDIR legt fehlende
 # Verzeichnisse als root an, deshalb hier einmal als root /build (Maven) und /app (Training)
@@ -68,17 +61,10 @@ COPY src ./src
 #   die die JVM sieht (GC-, JIT- und ForkJoin-Threads). JAVA_TOOL_OPTIONS statt MAVEN_OPTS, weil
 #   process-aot eine eigene JVM forkt, die MAVEN_OPTS nicht sieht. Überschreiben mit
 #   docker build --build-arg BUILD_CPUS=4.
-# - .git kommt als Bind-Mount aus der Stage "git" und landet in keinem Layer. rw, weil JGit z. B.
-#   den Index-Cache aktualisiert; die Änderungen werden verworfen.
-# - -Pdocker lässt git.dirty weg (siehe Profil in der pom.xml).
-# - Ohne --build-context ist /build/.git ein leeres Verzeichnis. Das Plugin hält es für ein Repo
-#   und bricht ab (failOnNoGitDirectory greift nicht), daher wird es dann übersprungen.
 ARG BUILD_CPUS=2
 RUN --mount=type=cache,target=/home/default/.m2,uid=185 \
-    --mount=type=bind,from=git,target=/build/.git,rw \
-    GIT_SKIP=$([ -f .git/HEAD ] || echo -Dmaven.gitcommitid.skip=true) && \
     JAVA_TOOL_OPTIONS="-XX:ActiveProcessorCount=${BUILD_CPUS}" \
-    mvn -q -Pdocker ${GIT_SKIP} -Dmaven.test.skip=true compile spring-boot:process-aot package
+    mvn -q -Dmaven.test.skip=true compile spring-boot:process-aot package
 
 # --- Extraktion ---
 # Ohne --launcher entsteht application/app.jar mit einem Class-Path-Manifest auf lib/*.jar.

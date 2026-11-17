@@ -16,7 +16,7 @@ IMAGE="$REGISTRY/helloworld:latest"
 NAMESPACE="default"
 
 echo "==> Baue Image (service/Dockerfile) ..."
-docker build --build-context git=.git -t helloworld service/
+docker build -t helloworld service/
 
 echo "==> Tagge Image als $IMAGE ..."
 docker tag helloworld "$IMAGE"
